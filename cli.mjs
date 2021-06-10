@@ -3,7 +3,7 @@ import {startClient} from './client.mjs';
 import {startPublisher} from './publisher.mjs';
 
 async function main() {
-  const queueCount = 5;
+  const queueCount = 3;
   const queueSizeLimit = 100;
   const command = (process.argv[2] || '').toLowerCase();
 
