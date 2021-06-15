@@ -1,89 +1,4 @@
-import {Channel, Message} from 'amqplib'
-import {outputMirrorQueueName, outputQueueName, partitionKeyHeader, responseQueueName} from './config'
-import {handleMessage} from './handleMessage'
-import {TxChannel} from './amqp'
-
-export async function createQState(
-  ch: TxChannel,
-  outputQueueCount: number,
-  onMessageProcessed: () => void
-): Promise<QState> {
-  const qState = new QState(ackMessages(ch), outputQueueCount, onMessageProcessed)
-
-  await consumeOutputMirrorQueues(ch, outputQueueCount, qState)
-  await consumeResponseQueue(ch, qState)
-
-  return qState
-}
-
-function ackMessages(ch: TxChannel) {
-  return async (outputDeliveryTag: number, responseDeliveryTag: number) => {
-    await ch.tx(tx => {
-      tx.ack({fields: {deliveryTag: outputDeliveryTag}} as Message)
-      tx.ack({fields: {deliveryTag: responseDeliveryTag}} as Message)
-    })
-  }
-}
-
-async function consumeOutputMirrorQueues(ch: TxChannel, outputQueueCount: number, qState: QState) {
-  const markerMessageId = '__marker/' + Date.now().toString()
-
-  return new Promise<void>(async (res, rej) => {
-    try {
-      await ch.tx(tx => {
-        for (let i = 0; i < outputQueueCount; i++) {
-          const queueName = outputMirrorQueueName(i + 1)
-          tx.publish('', queueName, Buffer.from(''), {persistent: true, messageId: markerMessageId})
-        }
-      })
-
-      for (let i = 0; i < outputQueueCount; i++) {
-        const queueName = outputQueueName(i + 1)
-        const mirrorQueueName = outputMirrorQueueName(i + 1)
-        let isInitialized = false
-
-        await ch.consume(
-          mirrorQueueName,
-          handleMessage(msg => {
-            const messageId = msg.properties.messageId
-            const deliveryTag = msg.fields.deliveryTag
-
-            if (isInitialized) {
-              qState.registerOutputDeliveryTag(messageId, deliveryTag)
-              return
-            }
-
-            if (messageId === markerMessageId) {
-              isInitialized = true
-              ch.tx(tx => tx.ack(msg))
-              res()
-              return
-            }
-
-            const partitionKey = msg.properties.headers[partitionKeyHeader]
-            qState.registerOutputMessage(messageId, partitionKey, queueName)
-            qState.registerOutputDeliveryTag(messageId, deliveryTag)
-          }),
-          {noAck: false}
-        )
-      }
-    } catch (err) {
-      rej(err)
-    }
-  })
-}
-
-async function consumeResponseQueue(ch: Channel, qState: QState) {
-  await ch.consume(
-    responseQueueName,
-    handleMessage(msg => {
-      const messageId = msg.properties.messageId
-      const deliveryTag = msg.fields.deliveryTag
-      qState.registerResponseDeliveryTag(messageId, deliveryTag)
-    }),
-    {noAck: false}
-  )
-}
+import {outputQueueName} from './config'
 
 interface QueueState {
   queueName: string
@@ -97,8 +12,56 @@ interface Session {
   messageCount: number
 }
 
-class QStateWithLimits {
-  // TODO: implement limits
+export class QStateWithLimits {
+  private readonly qState: QState
+  private readonly queueSizeLimit: number
+  private readonly singlePartitionKeyLimit: number
+
+  constructor(
+    ackMessages: (deliveryTag1: number, deliveryTag2: number) => Promise<void>,
+    queueCount: number,
+    onMessageProcessed: () => void,
+    queueSizeLimit: number,
+    singlePartitionKeyLimit: number
+  ) {
+    this.qState = new QState(ackMessages, queueCount, onMessageProcessed)
+    this.queueSizeLimit = queueSizeLimit
+    this.singlePartitionKeyLimit = singlePartitionKeyLimit
+  }
+
+  public canPublish(partitionKey: string) {
+    const sessionsByPartitionKey = this.qState.sessionsByPartitionKey
+    const queueStatesByQueueName = this.qState.queueStatesByQueueName
+    const queueStates = this.qState.queueStates
+
+    const session = sessionsByPartitionKey.get(partitionKey)
+
+    if (!session) {
+      // TODO: totalMessageCount < queueSizeLimit * queueCount
+      return queueStates.some(q => q.messageCount < this.queueSizeLimit)
+    }
+
+    if (session.messageCount >= this.singlePartitionKeyLimit) {
+      return false
+    }
+
+    // TODO: use session.queueState for performance reason
+    const queueState = queueStatesByQueueName.get(session.queueName)!
+
+    return queueState.messageCount < this.queueSizeLimit
+  }
+
+  public async registerOutputDeliveryTag(messageId: string, deliveryTag: number) {
+    await this.qState.registerOutputDeliveryTag(messageId, deliveryTag)
+  }
+
+  public async registerResponseDeliveryTag(messageId: string, deliveryTag: number) {
+    await this.qState.registerResponseDeliveryTag(messageId, deliveryTag)
+  }
+
+  public registerOutputMessage(messageId: string, partitionKey: string, queueName?: string): {queueName: string} {
+    return this.qState.registerOutputMessage(messageId, partitionKey, queueName)
+  }
 }
 
 export class QState {
@@ -108,9 +71,9 @@ export class QState {
   private readonly outputDeliveryTagsByMessageId = new Map<string, number>()
   private readonly responseDeliveryTagsByMessageId = new Map<string, number>()
   private readonly partitionKeysByMessageId = new Map<string, string>()
-  private readonly sessionsByPartitionKey = new Map<string, Session>()
-  private readonly queueStatesByQueueName = new Map<string, QueueState>()
-  private readonly queueStates = [] as QueueState[]
+  public readonly sessionsByPartitionKey = new Map<string, Session>()
+  public readonly queueStatesByQueueName = new Map<string, QueueState>()
+  public readonly queueStates = [] as QueueState[]
   // private readonly queueStatesByPartitionKey = new Map<string, QueueState>()
 
   constructor(
