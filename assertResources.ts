@@ -1,28 +1,26 @@
 import {Channel} from 'amqplib'
+import {inputQueueName, outputMirrorQueueName, outputQueueCount, outputQueueName, responseQueueName} from './config'
 
 export async function assertResources(ch: Channel, purge: boolean) {
-  await ch.assertQueue('input_queue', {durable: true})
-  await ch.assertExchange('output', 'topic', {durable: true})
-  await ch.assertQueue('response_queue', {durable: true})
+  await ch.assertQueue(inputQueueName, {durable: true})
+  await ch.assertQueue(responseQueueName, {durable: true})
 
   if (purge) {
-    await ch.purgeQueue('input_queue')
-    await ch.purgeQueue('response_queue')
+    await ch.purgeQueue(inputQueueName)
+    await ch.purgeQueue(responseQueueName)
   }
 
-  await assertOutputQueue(ch, 'output_1')
-  await assertOutputQueue(ch, 'output_2')
+  for (let i = 0; i < outputQueueCount; i++) {
+    await assertOutputQueue(ch, outputQueueName(i + 1))
+  }
 
-  async function assertOutputQueue(ch: Channel, name: string) {
-    await ch.assertQueue(name, {durable: true})
-    await ch.assertQueue(`${name}.mirror`, {durable: true})
+  async function assertOutputQueue(ch: Channel, outputQueue: string) {
+    await ch.assertQueue(outputQueue, {durable: true})
+    await ch.assertQueue(outputMirrorQueueName(outputQueue), {durable: true})
 
     if (purge) {
-      await ch.purgeQueue(name)
-      await ch.purgeQueue(`${name}.mirror`)
+      await ch.purgeQueue(outputQueue)
+      await ch.purgeQueue(`${outputQueue}.mirror`)
     }
-
-    await ch.bindQueue(name, 'output', name)
-    await ch.bindQueue(`${name}.mirror`, 'output', name)
   }
 }

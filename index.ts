@@ -4,41 +4,37 @@ import {startLoop} from './publishLoop'
 import {createQState} from './QState.factory'
 import BalancedQueue from './balancedQueue'
 import {assertResources} from './assertResources'
+import {Channel} from 'amqplib'
+import {inputQueueName, partitionKeyHeader} from './config'
+import {handleMessage} from './handleMessage'
 
 async function main() {
   const conn = await amqp.connect('amqp://guest:guest@localhost:5672/')
   console.log('connected')
 
-  const ch = await createTxChannel(conn)
-  console.log('created channel')
+  const inputCh = await conn.createChannel()
+  const qStateCh = await createTxChannel(conn)
+  const loopCh = await conn.createConfirmChannel()
+  console.log('created channels')
 
-  await assertResources(ch, true)
+  await assertResources(qStateCh, true)
   console.log('asserted resources')
 
   let scheduleStartLoop: () => void = () => {}
-
-  const qState = await createQState(ch, scheduleStartLoop)
   const balancedQueue = new BalancedQueue<Buffer>(_ => scheduleStartLoop())
 
+  const qState = await createQState(qStateCh, scheduleStartLoop)
+  console.log('created QState')
+
+  await consumeInputQueue(inputCh, balancedQueue)
+  console.log('consumed input queue')
+
   scheduleStartLoop = () => {
-    startLoop(ch, qState, balancedQueue)
+    startLoop(loopCh, qState, balancedQueue)
   }
 
-  // await ch.consume(
-  //   'input_queue',
-  //   handleMessage(msg => {
-  //     const partitionKey = msg.properties.headers['x-partition-key']
-  //     balancedQueue.enqueue(msg.content, partitionKey)
-  //
-  //     process.nextTick(() => {
-  //       checkOutputQueues()
-  //     })
-  //
-  //     ch.ack(msg)
-  //   }),
-  //   {noAck: false}
-  // )
-  //
+  scheduleStartLoop()
+
   // for (let i = 0; i < 5; i++) {
   //   for (let j = 0; j <= i; j++) {
   //     await publishAsync(ch, '', 'input_queue', Buffer.from(`account/${i}/message/${j}`), {
@@ -50,6 +46,18 @@ async function main() {
   //   }
   // }
   // console.log('published messages')
+}
+
+async function consumeInputQueue(ch: Channel, balancedQueue: BalancedQueue<Buffer>) {
+  await ch.consume(
+    inputQueueName,
+    handleMessage(msg => {
+      const partitionKey = msg.properties.headers[partitionKeyHeader]
+      balancedQueue.enqueue(msg.content, partitionKey)
+      ch.ack(msg)
+    }),
+    {noAck: false}
+  )
 }
 
 main()
