@@ -1,4 +1,4 @@
-import {Channel, Message} from 'amqplib'
+import {Channel, ConfirmChannel, Message} from 'amqplib'
 import {
   outputMirrorQueueName,
   outputQueueCount,
@@ -9,20 +9,20 @@ import {
   singlePartitionKeyLimit
 } from './config'
 import {handleMessage} from './handleMessage'
-import {TxChannel} from './amqp'
-import {QStateWithLimits} from './QState'
-import * as uuid from 'uuid'
+import {publishAsync} from './publishAsync'
+import {QState} from './QState'
+import {nanoid} from 'nanoid'
 
-export async function createQState(ch: TxChannel, onMessageProcessed: () => void): Promise<QStateWithLimits> {
-  const qState = new QStateWithLimits(
-    ackMessages(ch),
-    outputQueueCount,
+export async function createQState(ch: ConfirmChannel, onMessageProcessed: () => void): Promise<QState> {
+  const qState = new QState({
+    ackMessages: ackMessages(ch),
     onMessageProcessed,
-    outputQueueLimit,
+    queueCount: outputQueueCount,
+    queueSizeLimit: outputQueueLimit,
     singlePartitionKeyLimit
-  )
+  })
 
-  await consumeOutputMirrorQueues(ch, outputQueueCount, qState)
+  await consumeMirrorQueues(ch, qState, outputQueueCount)
   await consumeResponseQueue(ch, qState)
 
   return qState
@@ -35,55 +35,54 @@ function ackMessages(ch: Channel) {
   }
 }
 
-async function consumeOutputMirrorQueues(ch: TxChannel, outputQueueCount: number, qState: QStateWithLimits) {
-  const markerMessageId = `__marker/${uuid.v4()}`
+async function consumeMirrorQueues(ch: ConfirmChannel, qState: QState, queueCount: number) {
+  for (let i = 0; i < queueCount; i++) {
+    const queueName = outputQueueName(i + 1)
+    const mirrorQueueName = outputMirrorQueueName(queueName)
 
-  await ch.tx(tx => {
-    for (let i = 0; i < outputQueueCount; i++) {
-      const queueName = outputMirrorQueueName(outputQueueName(i + 1))
-      tx.publish('', queueName, Buffer.from(''), {persistent: true, messageId: markerMessageId})
-    }
-  })
-
-  for (let i = 0; i < outputQueueCount; i++) {
-    await new Promise<void>(async (res, rej) => {
-      try {
-        const queueName = outputQueueName(i + 1)
-        const mirrorQueueName = outputMirrorQueueName(queueName)
-        let isInitialized = false
-
-        await ch.consume(
-          mirrorQueueName,
-          handleMessage(msg => {
-            const messageId = msg.properties.messageId
-            const deliveryTag = msg.fields.deliveryTag
-
-            if (isInitialized) {
-              qState.registerOutputDeliveryTag(messageId, deliveryTag)
-              return
-            }
-
-            if (messageId === markerMessageId) {
-              isInitialized = true
-              ch.tx(tx => tx.ack(msg))
-              res()
-              return
-            }
-
-            const partitionKey = msg.properties.headers[partitionKeyHeader]
-            qState.registerOutputMessage(messageId, partitionKey, queueName)
-            qState.registerOutputDeliveryTag(messageId, deliveryTag)
-          }),
-          {noAck: false}
-        )
-      } catch (err) {
-        rej(err)
-      }
-    })
+    await consumeMirrorQueue(ch, qState, queueName, mirrorQueueName)
   }
 }
 
-async function consumeResponseQueue(ch: Channel, qState: QStateWithLimits) {
+async function consumeMirrorQueue(ch: ConfirmChannel, qState: QState, queueName: string, mirrorQueueName: string) {
+  return new Promise<void>(async (res, rej) => {
+    try {
+      const markerMessageId = `__marker/${nanoid()}`
+      let isInitialized = false
+
+      await publishAsync(ch, '', mirrorQueueName, Buffer.from(''), {persistent: true, messageId: markerMessageId})
+
+      await ch.consume(
+        mirrorQueueName,
+        handleMessage(msg => {
+          const messageId = msg.properties.messageId
+          const deliveryTag = msg.fields.deliveryTag
+
+          if (isInitialized) {
+            qState.registerMirrorDeliveryTag(messageId, deliveryTag)
+            return
+          }
+
+          if (messageId === markerMessageId) {
+            isInitialized = true
+            ch.ack(msg)
+            res()
+            return
+          }
+
+          const partitionKey = msg.properties.headers[partitionKeyHeader]
+          qState.restoreMessage(messageId, partitionKey, queueName)
+          qState.registerMirrorDeliveryTag(messageId, deliveryTag)
+        }),
+        {noAck: false}
+      )
+    } catch (err) {
+      rej(err)
+    }
+  })
+}
+
+async function consumeResponseQueue(ch: Channel, qState: QState) {
   await ch.consume(
     responseQueueName,
     handleMessage(msg => {

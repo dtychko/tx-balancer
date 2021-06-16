@@ -1,6 +1,5 @@
 import * as amqp from 'amqplib'
-import {createTxChannel} from './amqp'
-import {startLoop} from './publishLoop'
+import PublishLoop from './publishLoop'
 import {createQState} from './QState.factory'
 import BalancedQueue from './balancedQueue'
 import {assertResources} from './assertResources'
@@ -10,30 +9,33 @@ import {handleMessage} from './handleMessage'
 
 async function main() {
   const conn = await amqp.connect('amqp://guest:guest@localhost:5672/')
-  console.log('connected')
+  console.log('connected to RabbitMQ')
 
   const inputCh = await conn.createChannel()
-  const qStateCh = await createTxChannel(conn)
+  const qStateCh = await conn.createConfirmChannel()
   const loopCh = await conn.createConfirmChannel()
   console.log('created channels')
 
   await assertResources(qStateCh, true)
   console.log('asserted resources')
 
-  let scheduleStartLoop: () => void = () => {}
-  const balancedQueue = new BalancedQueue<Buffer>(_ => scheduleStartLoop())
+  const publishLoop = new PublishLoop()
+  console.log('created PublishLoop')
 
-  const qState = await createQState(qStateCh, scheduleStartLoop)
+  const balancedQueue = new BalancedQueue<Buffer>(publishLoop.trigger)
+  console.log('created BalancedQueue')
+
+  const qState = await createQState(qStateCh, publishLoop.trigger)
   console.log('created QState')
 
   await consumeInputQueue(inputCh, balancedQueue)
   console.log('consumed input queue')
 
-  scheduleStartLoop = () => {
-    startLoop(loopCh, qState, balancedQueue)
-  }
+  publishLoop.connectTo(loopCh, qState, balancedQueue)
+  console.log('connected PublishLoop')
 
-  scheduleStartLoop()
+  publishLoop.trigger()
+  console.log('started PublishLoop')
 
   // for (let i = 0; i < 5; i++) {
   //   for (let j = 0; j <= i; j++) {
