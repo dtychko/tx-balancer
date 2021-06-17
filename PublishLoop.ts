@@ -22,8 +22,8 @@ export default class PublishLoop {
     this.state.startLoop(() => {
       //
       // "inProgress" flag should be reset synchronously as soon as the current loop completed.
-      // "await this.state.startLoop" continuation code won't run immediately.
-      // It will be scheduled to run asynchronously,
+      // "await this.state.startLoop" continuation code won't run immediately,
+      // it will be scheduled to run asynchronously instead,
       // as a result some calls to "startLoop" method could be missed, because "inProgress" flag won't be reset yet.
       //
       // Try to run the following code snippet to understand the issue:
@@ -64,8 +64,10 @@ function emptyState() {
 function connectedState(ch: ConfirmChannel, qState: QState, balancedQueue: BalancedQueue<Buffer>) {
   return {
     startLoop: async (onCompleted: () => void) => {
+      // TODO: Think about error handling
+
       while (true) {
-        const dequeueResult = balancedQueue.tryDequeue(qState.canPublish)
+        const dequeueResult = balancedQueue.tryDequeue(pk => qState.canPublish(pk))
         if (!dequeueResult) {
           onCompleted()
           return
@@ -75,8 +77,16 @@ function connectedState(ch: ConfirmChannel, qState: QState, balancedQueue: Balan
         const messageId = nanoid()
         const {queueName} = qState.registerMessage(messageId, partitionKey)
 
-        await publishAsync(ch, '', outputMirrorQueueName(queueName), Buffer.from(''), {persistent: true, messageId})
-        await publishAsync(ch, '', queueName, value, {persistent: true, messageId})
+        publishAsync(ch, '', outputMirrorQueueName(queueName), Buffer.from(''), {persistent: true, messageId})
+        publishAsync(ch, '', queueName, value, {persistent: true, messageId})
+
+        // await Promise.all([
+        //   publishAsync(ch, '', outputMirrorQueueName(queueName), Buffer.from(''), {persistent: true, messageId}),
+        //   publishAsync(ch, '', queueName, value, {persistent: true, messageId})
+        // ])
+
+        // await publishAsync(ch, '', outputMirrorQueueName(queueName), Buffer.from(''), {persistent: true, messageId})
+        // await publishAsync(ch, '', queueName, value, {persistent: true, messageId})
 
         // TODO: Looks like publishing could be started concurrently for performance reason
         // await ch.tx(tx => {

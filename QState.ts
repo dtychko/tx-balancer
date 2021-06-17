@@ -12,18 +12,14 @@ interface Session {
 }
 
 interface QStateParams {
-  ackMessages: AckMessagesFunc
-  onMessageProcessed: () => void
+  onMessageProcessed: (messageId: string, mirrorDeliveryTag: number, responseDeliveryTag: number) => void
   queueCount: number
   queueSizeLimit: number
   singlePartitionKeyLimit: number
 }
 
-type AckMessagesFunc = (mirrorDeliveryTag: number, responseDeliveryTag: number) => Promise<void>
-
 export class QState {
-  private readonly ackMessages: AckMessagesFunc
-  private readonly onMessageProcessed: () => void
+  private readonly onMessageProcessed: QStateParams['onMessageProcessed']
   private readonly queueSizeLimit: number
   private readonly singlePartitionKeyLimit: number
 
@@ -35,7 +31,6 @@ export class QState {
   private readonly queueStates = [] as QueueState[]
 
   constructor(params: QStateParams) {
-    this.ackMessages = params.ackMessages
     this.onMessageProcessed = params.onMessageProcessed
     this.queueSizeLimit = params.queueSizeLimit
     this.singlePartitionKeyLimit = params.singlePartitionKeyLimit
@@ -132,8 +127,6 @@ export class QState {
   }
 
   private async processMessage(messageId: string, mirrorDeliveryTag: number, responseDeliveryTag: number) {
-    await this.ackMessages(mirrorDeliveryTag, responseDeliveryTag)
-
     const partitionKey = this.partitionKeysByMessageId.get(messageId)!
     this.partitionKeysByMessageId.delete(messageId)
 
@@ -145,8 +138,7 @@ export class QState {
 
     session.queueState.messageCount -= 1
 
-    // TODO: Move ack logic to onMessageProcessed handler
-    this.onMessageProcessed()
+    this.onMessageProcessed(messageId, mirrorDeliveryTag, responseDeliveryTag)
   }
 }
 

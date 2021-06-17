@@ -15,8 +15,11 @@ import {nanoid} from 'nanoid'
 
 export async function createQState(ch: ConfirmChannel, onMessageProcessed: () => void): Promise<QState> {
   const qState = new QState({
-    ackMessages: ackMessages(ch),
-    onMessageProcessed,
+    onMessageProcessed: (_, mirrorDeliveryTag, responseDeliveryTag) => {
+      ch.ack({fields: {deliveryTag: mirrorDeliveryTag}} as Message)
+      ch.ack({fields: {deliveryTag: responseDeliveryTag}} as Message)
+      onMessageProcessed()
+    },
     queueCount: outputQueueCount,
     queueSizeLimit: outputQueueLimit,
     singlePartitionKeyLimit
@@ -26,13 +29,6 @@ export async function createQState(ch: ConfirmChannel, onMessageProcessed: () =>
   await consumeResponseQueue(ch, qState)
 
   return qState
-}
-
-function ackMessages(ch: Channel) {
-  return async (outputDeliveryTag: number, responseDeliveryTag: number) => {
-    ch.ack({fields: {deliveryTag: outputDeliveryTag}} as Message)
-    ch.ack({fields: {deliveryTag: responseDeliveryTag}} as Message)
-  }
 }
 
 async function consumeMirrorQueues(ch: ConfirmChannel, qState: QState, queueCount: number) {

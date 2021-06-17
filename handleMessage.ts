@@ -3,8 +3,7 @@ import {ConsumeMessage} from 'amqplib'
 export function handleMessage(callback: (msg: ConsumeMessage) => void) {
   return (msg: ConsumeMessage | null) => {
     if (!msg) {
-      console.error('ERROR!')
-      return
+      throw new Error('Consumer is cancelled by server')
     }
 
     try {
