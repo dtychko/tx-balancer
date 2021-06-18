@@ -95,10 +95,10 @@ export default class MessageStorage {
     this.removeMessagesDurationMetric = removeMessagesDurationMetric
     this.readMessagesDurationMetric = readMessagesDurationMetric
     this.readMessagesOrderedByIdDurationMetric = readMessagesOrderedByIdDurationMetric
-    this.scheduleCreateMessageTask = createAsyncBatchProcessor(this.processCreateMessageTasks.bind(this), batchSize)
-    this.scheduleRemoveMessageTask = createAsyncBatchProcessor(this.processRemoveMessageTasks.bind(this), batchSize)
-    this.scheduleReadMessageTask = createAsyncBatchProcessor(this.processReadMessageTasks.bind(this), batchSize)
-    this.scheduleReadMessagesOrderedByIdTask = createAsyncBatchProcessor(this.processReadMessagesOrderedByIdTasks.bind(this), batchSize)
+    this.scheduleCreateMessageTask = createAsyncBatchProcessor<CreateMessageTask, Message>(this.processCreateMessageTasks.bind(this), batchSize)
+    this.scheduleRemoveMessageTask = createAsyncBatchProcessor<RemoveMessageTask, void>(this.processRemoveMessageTasks.bind(this), batchSize)
+    this.scheduleReadMessageTask = createAsyncBatchProcessor<ReadMessageTask, Message | undefined>(this.processReadMessageTasks.bind(this), batchSize)
+    this.scheduleReadMessagesOrderedByIdTask = createAsyncBatchProcessor<ReadMessagesOrderedByIdTask, Message[]>(this.processReadMessagesOrderedByIdTasks.bind(this), batchSize)
   }
 
   public createMessage(message: MessageData) {

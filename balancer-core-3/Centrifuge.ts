@@ -1,8 +1,13 @@
 export default class Centrifuge<TValue> {
   private readonly partitions = new Map<string, Partition<TValue>>()
   private readonly partitionQueue = new PartitionQueue<TValue>()
+  private valueCount = 0
 
-  public enqueue(value: TValue, partitionKey: string) {
+  public size() {
+    return this.valueCount
+  }
+
+  public enqueue(value: TValue, partitionKey: string): number {
     let partition = this.partitions.get(partitionKey)
     if (!partition) {
       partition = new Partition<TValue>(partitionKey)
@@ -11,10 +16,9 @@ export default class Centrifuge<TValue> {
     }
 
     partition.enqueue(value)
+    this.valueCount += 1
 
-    // if (partition.length === 1) {
-    //   this.onPartitionAdded(partitionKey)
-    // }
+    return partition.size()
   }
 
   public tryDequeue(predicate: (partitionKey: string) => boolean): {value: TValue; partitionKey: string} | undefined {
@@ -28,6 +32,8 @@ export default class Centrifuge<TValue> {
     } else {
       this.partitions.delete(partition.partitionKey)
     }
+
+    this.valueCount -= 1
 
     return {
       value: partition.dequeue(),

@@ -5,7 +5,8 @@ export const responseQueueName = '_tx_balancer_response'
 export const outputQueueName = (index: number) => `_tx_balancer_output_${index}`
 export const outputMirrorQueueName = (outputQueue: string) => `${outputQueue}.mirror`
 
+export const partitionGroupHeader = 'x-partition-group'
 export const partitionKeyHeader = 'x-partition-key'
 export const outputQueueCount = 3
 export const outputQueueLimit = 100
-export const singlePartitionKeyLimit = 50
+export const singlePartitionGroupLimit = 50

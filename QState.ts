@@ -6,7 +6,7 @@ interface QueueState {
 }
 
 interface Session {
-  partitionKey: string
+  partitionGroup: string
   queueState: QueueState
   messageCount: number
 }
@@ -15,25 +15,25 @@ interface QStateParams {
   onMessageProcessed: (messageId: string, mirrorDeliveryTag: number, responseDeliveryTag: number) => void
   queueCount: number
   queueSizeLimit: number
-  singlePartitionKeyLimit: number
+  singlePartitionGroupLimit: number
 }
 
 export class QState {
   private readonly onMessageProcessed: QStateParams['onMessageProcessed']
   private readonly queueSizeLimit: number
-  private readonly singlePartitionKeyLimit: number
+  private readonly singlePartitionGroupLimit: number
 
   private readonly mirrorDeliveryTagsByMessageId = new Map<string, number>()
   private readonly responseDeliveryTagsByMessageId = new Map<string, number>()
-  private readonly partitionKeysByMessageId = new Map<string, string>()
-  private readonly sessionsByPartitionKey = new Map<string, Session>()
+  private readonly partitionGroupsByMessageId = new Map<string, string>()
+  private readonly sessionsByPartitionGroup = new Map<string, Session>()
   private readonly queueStatesByQueueName = new Map<string, QueueState>()
   private readonly queueStates = [] as QueueState[]
 
   constructor(params: QStateParams) {
     this.onMessageProcessed = params.onMessageProcessed
     this.queueSizeLimit = params.queueSizeLimit
-    this.singlePartitionKeyLimit = params.singlePartitionKeyLimit
+    this.singlePartitionGroupLimit = params.singlePartitionGroupLimit
 
     const queueNames = Array.from({length: params.queueCount}, (_, i) => outputQueueName(i + 1))
     for (const queueName of queueNames) {
@@ -43,14 +43,14 @@ export class QState {
     }
   }
 
-  public canPublish(partitionKey: string) {
-    const session = this.sessionsByPartitionKey.get(partitionKey)
+  public canPublish(partitionGroup: string) {
+    const session = this.sessionsByPartitionGroup.get(partitionGroup)
 
     if (!session) {
-      return this.getQueueState(partitionKey).messageCount < this.queueSizeLimit
+      return this.getQueueState(partitionGroup).messageCount < this.queueSizeLimit
     }
 
-    return session.queueState.messageCount < this.queueSizeLimit && session.messageCount < this.singlePartitionKeyLimit
+    return session.queueState.messageCount < this.queueSizeLimit && session.messageCount < this.singlePartitionGroupLimit
   }
 
   public async registerMirrorDeliveryTag(messageId: string, deliveryTag: number) {
@@ -73,48 +73,48 @@ export class QState {
     }
   }
 
-  public restoreMessage(messageId: string, partitionKey: string, queueName: string) {
-    const expectedQueueName = this.getQueueState(partitionKey).queueName
+  public restoreMessage(messageId: string, partitionGroup: string, partitionKey: string, queueName: string) {
+    const expectedQueueName = this.getQueueState(partitionGroup).queueName
 
     // TODO: Maybe move this check to the caller side and just log warning instead of throwing
     if (queueName !== expectedQueueName) {
       throw new Error(
-        `Can't bind partition key "${partitionKey}" to queue "${queueName}" ` +
-          `because it's bound to queue "${expectedQueueName}"`
+        `Can't bind partition group "${partitionGroup}" to queue "${queueName}" ` +
+          `because it's already bound to queue "${expectedQueueName}"`
       )
     }
 
-    this.registerMessage(messageId, partitionKey)
+    this.registerMessage(messageId, partitionGroup, partitionKey)
   }
 
-  public registerMessage(messageId: string, partitionKey: string): {queueName: string} {
-    const session = this.getOrAddSessions(partitionKey)
+  public registerMessage(messageId: string, partitionGroup: string, _partitionKey: string): {queueName: string} {
+    const session = this.getOrAddSessions(partitionGroup)
 
     // TODO: ? Assert queueState + session limits
 
     session.messageCount += 1
     session.queueState.messageCount += 1
 
-    this.partitionKeysByMessageId.set(messageId, partitionKey)
+    this.partitionGroupsByMessageId.set(messageId, partitionGroup)
 
     return {queueName: session.queueState.queueName}
   }
 
-  private getOrAddSessions(partitionKey: string): Session {
-    let session = this.sessionsByPartitionKey.get(partitionKey)
+  private getOrAddSessions(partitionGroup: string): Session {
+    let session = this.sessionsByPartitionGroup.get(partitionGroup)
 
     if (!session) {
-      const queueState = this.getQueueState(partitionKey)
-      session = {partitionKey, queueState, messageCount: 0}
-      this.sessionsByPartitionKey.set(partitionKey, session)
+      const queueState = this.getQueueState(partitionGroup)
+      session = {partitionGroup: partitionGroup, queueState, messageCount: 0}
+      this.sessionsByPartitionGroup.set(partitionGroup, session)
     }
 
     return session
   }
 
-  private getQueueState(partitionKey: string): QueueState {
-    // Just sum partitionKey char codes instead of calculating a complex hash
-    const queueIndex = sumCharCodes(partitionKey) % this.queueStates.length
+  private getQueueState(partitionGroup: string): QueueState {
+    // Just sum partitionGroup char codes instead of calculating a complex hash
+    const queueIndex = sumCharCodes(partitionGroup) % this.queueStates.length
     return this.queueStates[queueIndex]
   }
 
@@ -127,13 +127,13 @@ export class QState {
   }
 
   private async processMessage(messageId: string, mirrorDeliveryTag: number, responseDeliveryTag: number) {
-    const partitionKey = this.partitionKeysByMessageId.get(messageId)!
-    this.partitionKeysByMessageId.delete(messageId)
+    const partitionGroup = this.partitionGroupsByMessageId.get(messageId)!
+    this.partitionGroupsByMessageId.delete(messageId)
 
-    const session = this.sessionsByPartitionKey.get(partitionKey)!
+    const session = this.sessionsByPartitionGroup.get(partitionGroup)!
     session.messageCount -= 1
     if (!session.messageCount) {
-      this.sessionsByPartitionKey.delete(partitionKey)
+      this.sessionsByPartitionGroup.delete(partitionGroup)
     }
 
     session.queueState.messageCount -= 1

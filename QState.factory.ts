@@ -3,10 +3,10 @@ import {
   outputMirrorQueueName,
   outputQueueCount,
   outputQueueLimit,
-  outputQueueName,
+  outputQueueName, partitionGroupHeader,
   partitionKeyHeader,
   responseQueueName,
-  singlePartitionKeyLimit
+  singlePartitionGroupLimit
 } from './config'
 import {handleMessage} from './handleMessage'
 import {publishAsync} from './publishAsync'
@@ -22,7 +22,7 @@ export async function createQState(ch: ConfirmChannel, onMessageProcessed: () =>
     },
     queueCount: outputQueueCount,
     queueSizeLimit: outputQueueLimit,
-    singlePartitionKeyLimit
+    singlePartitionGroupLimit: singlePartitionGroupLimit
   })
 
   await consumeMirrorQueues(ch, qState, outputQueueCount)
@@ -66,8 +66,9 @@ async function consumeMirrorQueue(ch: ConfirmChannel, qState: QState, queueName:
             return
           }
 
+          const partitionGroup = msg.properties.headers[partitionGroupHeader]
           const partitionKey = msg.properties.headers[partitionKeyHeader]
-          qState.restoreMessage(messageId, partitionKey, queueName)
+          qState.restoreMessage(messageId, partitionGroup, partitionKey, queueName)
           qState.registerMirrorDeliveryTag(messageId, deliveryTag)
         }),
         {noAck: false}

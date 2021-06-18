@@ -1,16 +1,16 @@
+import MessageBalancer from './balancer-core-3/MessageBalancer'
 import {QState} from './qState'
-import BalancedQueue from './balancedQueue'
 import {nanoid} from 'nanoid'
-import {ConfirmChannel} from 'amqplib'
+import {ConfirmChannel, MessageProperties} from 'amqplib'
 import {publishAsync} from './publishAsync'
-import {outputMirrorQueueName} from './config'
+import {outputMirrorQueueName, partitionGroupHeader, partitionKeyHeader} from './config'
 
 export default class PublishLoop {
   private state = emptyState()
   private inProgress = false
 
-  public connectTo(ch: ConfirmChannel, qState: QState, balancedQueue: BalancedQueue<Buffer>) {
-    this.state = connectedState(ch, qState, balancedQueue)
+  public connectTo(ch: ConfirmChannel, qState: QState, messageBalancer: MessageBalancer) {
+    this.state = connectedState(ch, qState, messageBalancer)
   }
 
   public trigger() {
@@ -61,38 +61,45 @@ function emptyState() {
   }
 }
 
-function connectedState(ch: ConfirmChannel, qState: QState, balancedQueue: BalancedQueue<Buffer>) {
+function connectedState(ch: ConfirmChannel, qState: QState, messageBalancer: MessageBalancer) {
   return {
     startLoop: async (onCompleted: () => void) => {
       // TODO: Think about error handling
 
       while (true) {
-        const dequeueResult = balancedQueue.tryDequeue(pk => qState.canPublish(pk))
-        if (!dequeueResult) {
+        const processMessage = messageBalancer.tryDequeueMessage(
+          pk => qState.canPublish(pk),
+          () => true
+        )
+        if (!processMessage) {
           onCompleted()
           return
         }
 
-        const {value, partitionKey} = dequeueResult
-        const messageId = nanoid()
-        const {queueName} = qState.registerMessage(messageId, partitionKey)
+        // TODO: Should we await?
+        processMessage(async message => {
+          const {partitionGroup, partitionKey, content, properties} = message
 
-        publishAsync(ch, '', outputMirrorQueueName(queueName), Buffer.from(''), {persistent: true, messageId})
-        publishAsync(ch, '', queueName, value, {persistent: true, messageId})
+          // TODO: Could we use message.messageId instead?
+          const messageId = nanoid()
+          const {queueName} = qState.registerMessage(messageId, partitionGroup, partitionKey)
 
-        // await Promise.all([
-        //   publishAsync(ch, '', outputMirrorQueueName(queueName), Buffer.from(''), {persistent: true, messageId}),
-        //   publishAsync(ch, '', queueName, value, {persistent: true, messageId})
-        // ])
-
-        // await publishAsync(ch, '', outputMirrorQueueName(queueName), Buffer.from(''), {persistent: true, messageId})
-        // await publishAsync(ch, '', queueName, value, {persistent: true, messageId})
-
-        // TODO: Looks like publishing could be started concurrently for performance reason
-        // await ch.tx(tx => {
-        //   tx.publish('', queueName, value, {persistent: true, messageId})
-        //   tx.publish('', outputMirrorQueueName(queueName), Buffer.from(''), {persistent: true, messageId})
-        // })
+          await Promise.all([
+            publishAsync(ch, '', outputMirrorQueueName(queueName), Buffer.from(''), {
+              headers: {
+                [partitionGroupHeader]: partitionGroup,
+                [partitionKeyHeader]: partitionKey
+              },
+              persistent: true,
+              messageId
+            }),
+            publishAsync(ch, '', queueName, content, {
+              ...(properties as MessageProperties),
+              persistent: true,
+              messageId
+            })
+          ])
+        })
       }
     }
   }

@@ -1,8 +1,9 @@
 import * as amqp from 'amqplib'
+import {MessageCache} from './balancer-core'
+import MessageBalancer from './balancer-core-3/MessageBalancer'
 import {publishAsync} from './publishAsync'
 import PublishLoop from './publishLoop'
 import {createQState} from './QState.factory'
-import BalancedQueue from './balancedQueue'
 import {assertResources} from './assertResources'
 import {Channel, Connection} from 'amqplib'
 import {
@@ -10,6 +11,7 @@ import {
   inputQueueName,
   outputQueueCount,
   outputQueueName,
+  partitionGroupHeader,
   partitionKeyHeader,
   responseQueueName
 } from './config'
@@ -30,16 +32,20 @@ async function main() {
   const publishLoop = new PublishLoop()
   console.log('created PublishLoop')
 
-  const balancedQueue = new BalancedQueue<Buffer>(_ => publishLoop.trigger())
+  const messageBalancer = new MessageBalancer({
+    storage: createFakeStorage(),
+    cache: new MessageCache(),
+    onPartitionAdded: _ => publishLoop.trigger()
+  })
   console.log('created BalancedQueue')
 
   const qState = await createQState(qStateCh, () => publishLoop.trigger())
   console.log('created QState')
 
-  await consumeInputQueue(inputCh, balancedQueue)
+  await consumeInputQueue(inputCh, messageBalancer)
   console.log('consumed input queue')
 
-  publishLoop.connectTo(loopCh, qState, balancedQueue)
+  publishLoop.connectTo(loopCh, qState, messageBalancer)
   console.log('connected PublishLoop')
 
   publishLoop.trigger()
@@ -52,16 +58,30 @@ async function main() {
   console.log('started fake publisher')
 }
 
-async function consumeInputQueue(ch: Channel, balancedQueue: BalancedQueue<Buffer>) {
+async function consumeInputQueue(ch: Channel, messageBalancer: MessageBalancer) {
   await ch.consume(
     inputQueueName,
-    handleMessage(msg => {
+    handleMessage(async msg => {
+      const {content, properties} = msg
+      const partitionGroup = msg.properties.headers[partitionGroupHeader]
       const partitionKey = msg.properties.headers[partitionKeyHeader]
-      balancedQueue.enqueue(msg.content, partitionKey)
+      await messageBalancer.storeMessage({partitionGroup, partitionKey, content, properties})
       ch.ack(msg)
     }),
     {noAck: false}
   )
+}
+
+function createFakeStorage(): any {
+  let messageId = 1
+
+  return {
+    createMessage(data: any) {
+      return {...data, messageId: messageId++} as any
+    },
+    removeMessage() {},
+    getMessage() {}
+  }
 }
 
 async function startFakePublisher(conn: Connection) {
@@ -76,7 +96,8 @@ async function startFakePublisher(conn: Connection) {
           publishAsync(publishCh, '', inputQueueName, Buffer.from(`account/${i}/message/${j}`), {
             persistent: true,
             headers: {
-              [partitionKeyHeader]: `account/${i}`
+              [partitionGroupHeader]: `account/${i}`,
+              [partitionKeyHeader]: i % 2 === 0 ? 'even' : 'odd'
             }
           })
         )
