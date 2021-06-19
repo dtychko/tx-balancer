@@ -1,4 +1,5 @@
 import Centrifuge from './Centrifuge'
+import {PartitionGroupGuard} from '../QState'
 
 export default class PartitionGroupQueue {
   private readonly partitionGroupCentrifuges = new Map<string, Centrifuge<number>>()
@@ -21,17 +22,17 @@ export default class PartitionGroupQueue {
   }
 
   public tryDequeue(
-    partitionGroupPredicate: (partitionGroup: string) => boolean,
-    partitionKeyPredicate: (partitionKey: string) => boolean
+    canProcess: (partitionGroup: string) => PartitionGroupGuard
   ): {messageId: number; partitionGroup: string; partitionKey: string} | undefined {
     for (let i = 0; i < this.partitionGroupQueue.length; i++) {
       const {partitionGroup, centrifuge} = this.partitionGroupQueue[i]
+      const guard = canProcess(partitionGroup)
 
-      if (!partitionGroupPredicate(partitionGroup)) {
+      if (!guard.canProcessPartitionGroup) {
         continue
       }
 
-      const dequeued = centrifuge.tryDequeue(partitionKeyPredicate)
+      const dequeued = centrifuge.tryDequeue(partitionKey => guard.canProcessPartitionKey(partitionKey))
 
       if (dequeued) {
         this.partitionGroupQueue.splice(i, 1)

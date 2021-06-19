@@ -1,9 +1,9 @@
-import MessageBalancer from './balancer-core-3/MessageBalancer'
+import MessageBalancer, {MessageRef} from './balancer-core-3/MessageBalancer'
 import {QState} from './qState'
-import {nanoid} from 'nanoid'
 import {ConfirmChannel, MessageProperties} from 'amqplib'
 import {publishAsync} from './publishAsync'
 import {outputMirrorQueueName, partitionGroupHeader, partitionKeyHeader} from './config'
+import ExecutionSerializer from './balancer-core/MessageBalancer.Serializer'
 
 export default class PublishLoop {
   private state = emptyState()
@@ -62,45 +62,54 @@ function emptyState() {
 }
 
 function connectedState(ch: ConfirmChannel, qState: QState, messageBalancer: MessageBalancer) {
+  const executor = new ExecutionSerializer()
+
   return {
     startLoop: async (onCompleted: () => void) => {
       // TODO: Think about error handling
-
       while (true) {
-        const processMessage = messageBalancer.tryDequeueMessage(
-          pk => qState.canPublish(pk),
-          () => true
-        )
-        if (!processMessage) {
+        const messageRef = messageBalancer.tryDequeueMessage(partitionGroup => qState.canRegister(partitionGroup))
+
+        if (!messageRef) {
           onCompleted()
           return
         }
 
-        // TODO: Should we await?
-        processMessage(async message => {
-          const {partitionGroup, partitionKey, content, properties} = message
+        const {messageId, partitionGroup, partitionKey} = messageRef
+        const {queueName} = qState.registerMessage(messageId.toString(), partitionGroup, partitionKey)
 
-          // TODO: Could we use message.messageId instead?
-          const messageId = nanoid()
-          const {queueName} = qState.registerMessage(messageId, partitionGroup, partitionKey)
-
-          await Promise.all([
-            publishAsync(ch, '', outputMirrorQueueName(queueName), Buffer.from(''), {
-              headers: {
-                [partitionGroupHeader]: partitionGroup,
-                [partitionKeyHeader]: partitionKey
-              },
-              persistent: true,
-              messageId
-            }),
-            publishAsync(ch, '', queueName, content, {
-              ...(properties as MessageProperties),
-              persistent: true,
-              messageId
-            })
-          ])
-        })
+        scheduleMessageProcessing(messageRef, queueName)
       }
     }
+  }
+
+  async function scheduleMessageProcessing(messageRef: MessageRef, queueName: string) {
+    // TODO: Think about error handling
+    // TODO: Serialize message resolution by partitionGroup
+    const [, message] = await executor.serializeResolution(
+      'getMessage',
+      messageBalancer.getMessage(messageRef.messageId)
+    )
+    const {content, properties} = message
+    const {partitionGroup, partitionKey} = messageRef
+    const messageId = messageRef.messageId.toString()
+
+    await Promise.all([
+      publishAsync(ch, '', outputMirrorQueueName(queueName), Buffer.from(''), {
+        headers: {
+          [partitionGroupHeader]: partitionGroup,
+          [partitionKeyHeader]: partitionKey
+        },
+        persistent: true,
+        messageId
+      }),
+      publishAsync(ch, '', queueName, content, {
+        ...(properties as MessageProperties),
+        persistent: true,
+        messageId
+      })
+    ])
+
+    await messageBalancer.removeMessage(messageRef.messageId)
   }
 }

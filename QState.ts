@@ -1,14 +1,30 @@
 import {outputQueueName} from './config'
 
-interface QueueState {
+interface QueueSession {
   queueName: string
   messageCount: number
 }
 
-interface Session {
+interface PartitionGroupSession {
   partitionGroup: string
-  queueState: QueueState
+  queueSession: QueueSession
   messageCount: number
+  partitionKeySessions: Map<string, PartitionKeySession>
+}
+
+interface PartitionKeySession {
+  partitionKey: string
+  partitionGroupSession: PartitionGroupSession
+  messageCount: number
+}
+
+interface MessageSession {
+  partitionKeySession: PartitionKeySession
+}
+
+export interface PartitionGroupGuard {
+  canProcessPartitionGroup: boolean
+  canProcessPartitionKey: (partitionKey: string) => boolean
 }
 
 interface QStateParams {
@@ -16,41 +32,69 @@ interface QStateParams {
   queueCount: number
   queueSizeLimit: number
   singlePartitionGroupLimit: number
+  singlePartitionKeyLimit: number
 }
 
 export class QState {
   private readonly onMessageProcessed: QStateParams['onMessageProcessed']
   private readonly queueSizeLimit: number
   private readonly singlePartitionGroupLimit: number
+  private readonly singlePartitionKeyLimit: number
 
   private readonly mirrorDeliveryTagsByMessageId = new Map<string, number>()
   private readonly responseDeliveryTagsByMessageId = new Map<string, number>()
-  private readonly partitionGroupsByMessageId = new Map<string, string>()
-  private readonly sessionsByPartitionGroup = new Map<string, Session>()
-  private readonly queueStatesByQueueName = new Map<string, QueueState>()
-  private readonly queueStates = [] as QueueState[]
+  private readonly messageSessionsByMessageId = new Map<string, MessageSession>()
+  private readonly partitionGroupSessionsByPartitionGroup = new Map<string, PartitionGroupSession>()
+  private readonly queueSessionsByQueueName = new Map<string, QueueSession>()
+  private readonly queueSessions = [] as QueueSession[]
 
   constructor(params: QStateParams) {
     this.onMessageProcessed = params.onMessageProcessed
     this.queueSizeLimit = params.queueSizeLimit
     this.singlePartitionGroupLimit = params.singlePartitionGroupLimit
+    this.singlePartitionKeyLimit = params.singlePartitionKeyLimit
 
     const queueNames = Array.from({length: params.queueCount}, (_, i) => outputQueueName(i + 1))
     for (const queueName of queueNames) {
       const queueState = {queueName, messageCount: 0}
-      this.queueStates.push(queueState)
-      this.queueStatesByQueueName.set(queueName, queueState)
+      this.queueSessions.push(queueState)
+      this.queueSessionsByQueueName.set(queueName, queueState)
     }
   }
 
-  public canPublish(partitionGroup: string) {
-    const session = this.sessionsByPartitionGroup.get(partitionGroup)
+  public canRegister(partitionGroup: string): PartitionGroupGuard {
+    const partitionGroupSession = this.partitionGroupSessionsByPartitionGroup.get(partitionGroup)
 
-    if (!session) {
-      return this.getQueueState(partitionGroup).messageCount < this.queueSizeLimit
+    if (!partitionGroupSession) {
+      const canPublish = this.getQueueState(partitionGroup).messageCount < this.queueSizeLimit
+
+      return {
+        canProcessPartitionGroup: canPublish,
+        canProcessPartitionKey: () => canPublish
+      }
     }
 
-    return session.queueState.messageCount < this.queueSizeLimit && session.messageCount < this.singlePartitionGroupLimit
+    const canPublish =
+      partitionGroupSession.queueSession.messageCount < this.queueSizeLimit &&
+      partitionGroupSession.messageCount < this.singlePartitionGroupLimit
+
+    if (canPublish) {
+      return {
+        canProcessPartitionGroup: true,
+        canProcessPartitionKey: (partitionKey: string) => {
+          const partitionKeySession = partitionGroupSession!.partitionKeySessions.get(partitionKey)
+          if (!partitionKeySession) {
+            return true
+          }
+          return partitionKeySession.messageCount < this.singlePartitionKeyLimit
+        }
+      }
+    }
+
+    return {
+      canProcessPartitionGroup: false,
+      canProcessPartitionKey: () => false
+    }
   }
 
   public async registerMirrorDeliveryTag(messageId: string, deliveryTag: number) {
@@ -87,56 +131,90 @@ export class QState {
     this.registerMessage(messageId, partitionGroup, partitionKey)
   }
 
-  public registerMessage(messageId: string, partitionGroup: string, _partitionKey: string): {queueName: string} {
-    const session = this.getOrAddSessions(partitionGroup)
+  public registerMessage(messageId: string, partitionGroup: string, partitionKey: string): {queueName: string} {
+    const partitionGroupSession = this.getOrAddPartitionGroupSession(partitionGroup)
+    const partitionKeySession = QState.getOrAddPartitionKeySession(partitionGroupSession, partitionKey)
+    const messageSession = {
+      partitionKeySession
+    }
 
-    // TODO: ? Assert queueState + session limits
+    partitionGroupSession.messageCount += 1
+    partitionGroupSession.queueSession.messageCount += 1
+    partitionKeySession.messageCount += 1
 
-    session.messageCount += 1
-    session.queueState.messageCount += 1
+    this.messageSessionsByMessageId.set(messageId, messageSession)
 
-    this.partitionGroupsByMessageId.set(messageId, partitionGroup)
-
-    return {queueName: session.queueState.queueName}
+    return {queueName: partitionGroupSession.queueSession.queueName}
   }
 
-  private getOrAddSessions(partitionGroup: string): Session {
-    let session = this.sessionsByPartitionGroup.get(partitionGroup)
+  private getOrAddPartitionGroupSession(partitionGroup: string): PartitionGroupSession {
+    let session = this.partitionGroupSessionsByPartitionGroup.get(partitionGroup)
 
     if (!session) {
       const queueState = this.getQueueState(partitionGroup)
-      session = {partitionGroup: partitionGroup, queueState, messageCount: 0}
-      this.sessionsByPartitionGroup.set(partitionGroup, session)
+      session = {
+        partitionGroup,
+        queueSession: queueState,
+        partitionKeySessions: new Map<string, PartitionKeySession>(),
+        messageCount: 0
+      }
+      this.partitionGroupSessionsByPartitionGroup.set(partitionGroup, session)
     }
 
     return session
   }
 
-  private getQueueState(partitionGroup: string): QueueState {
-    // Just sum partitionGroup char codes instead of calculating a complex hash
-    const queueIndex = sumCharCodes(partitionGroup) % this.queueStates.length
-    return this.queueStates[queueIndex]
+  private static getOrAddPartitionKeySession(
+    partitionGroupSession: PartitionGroupSession,
+    partitionKey: string
+  ): PartitionKeySession {
+    let partitionKeySession = partitionGroupSession.partitionKeySessions.get(partitionKey)
+
+    if (!partitionKeySession) {
+      partitionKeySession = {
+        partitionKey,
+        partitionGroupSession,
+        messageCount: 0
+      }
+      partitionGroupSession.partitionKeySessions.set(partitionKey, partitionKeySession)
+    }
+
+    return partitionKeySession
   }
 
-  private getOrAddQueueState(queueName: string) {
-    let queueState = this.queueStatesByQueueName.get(queueName)
-    if (!queueState) {
-      throw new Error(`Unknown queue "${queueName}"`)
-    }
-    return queueState
+  private getQueueState(partitionGroup: string): QueueSession {
+    // Just sum partitionGroup char codes instead of calculating a complex hash
+    const queueIndex = sumCharCodes(partitionGroup) % this.queueSessions.length
+    return this.queueSessions[queueIndex]
   }
+
+  // private getOrAddQueueState(queueName: string) {
+  //   let queueState = this.queueStatesByQueueName.get(queueName)
+  //   if (!queueState) {
+  //     throw new Error(`Unknown queue "${queueName}"`)
+  //   }
+  //   return queueState
+  // }
 
   private async processMessage(messageId: string, mirrorDeliveryTag: number, responseDeliveryTag: number) {
-    const partitionGroup = this.partitionGroupsByMessageId.get(messageId)!
-    this.partitionGroupsByMessageId.delete(messageId)
+    const messageSession = this.messageSessionsByMessageId.get(messageId)!
+    const partitionKeySession = messageSession.partitionKeySession
+    const partitionGroupSession = partitionKeySession.partitionGroupSession
+    const queueState = partitionGroupSession.queueSession
 
-    const session = this.sessionsByPartitionGroup.get(partitionGroup)!
-    session.messageCount -= 1
-    if (!session.messageCount) {
-      this.sessionsByPartitionGroup.delete(partitionGroup)
+    this.messageSessionsByMessageId.delete(messageId)
+
+    partitionKeySession.messageCount -= 1
+    if (!partitionKeySession.messageCount) {
+      partitionGroupSession.partitionKeySessions.delete(partitionKeySession.partitionKey)
     }
 
-    session.queueState.messageCount -= 1
+    partitionGroupSession.messageCount -= 1
+    if (!partitionGroupSession.messageCount) {
+      this.partitionGroupSessionsByPartitionGroup.delete(partitionGroupSession.partitionGroup)
+    }
+
+    queueState.messageCount -= 1
 
     this.onMessageProcessed(messageId, mirrorDeliveryTag, responseDeliveryTag)
   }
