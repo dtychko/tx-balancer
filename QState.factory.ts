@@ -3,10 +3,12 @@ import {
   outputMirrorQueueName,
   outputQueueCount,
   outputQueueLimit,
-  outputQueueName, partitionGroupHeader,
+  outputQueueName,
+  partitionGroupHeader,
   partitionKeyHeader,
   responseQueueName,
-  singlePartitionGroupLimit
+  singlePartitionGroupLimit,
+  singlePartitionKeyLimit
 } from './config'
 import {handleMessage} from './handleMessage'
 import {publishAsync} from './publishAsync'
@@ -22,7 +24,8 @@ export async function createQState(ch: ConfirmChannel, onMessageProcessed: () =>
     },
     queueCount: outputQueueCount,
     queueSizeLimit: outputQueueLimit,
-    singlePartitionGroupLimit: singlePartitionGroupLimit
+    singlePartitionGroupLimit: singlePartitionGroupLimit,
+    singlePartitionKeyLimit: singlePartitionKeyLimit
   })
 
   await consumeMirrorQueues(ch, qState, outputQueueCount)

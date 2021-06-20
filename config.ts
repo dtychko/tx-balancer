@@ -10,3 +10,4 @@ export const partitionKeyHeader = 'x-partition-key'
 export const outputQueueCount = 3
 export const outputQueueLimit = 100
 export const singlePartitionGroupLimit = 50
+export const singlePartitionKeyLimit = 10

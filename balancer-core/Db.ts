@@ -1,3 +1,5 @@
+import {addAbortSignal} from 'stream'
+
 export interface Pool {
   // tslint:disable-next-line:no-any
   query: <TRow = any>(queryText: string, values?: unknown[]) => Promise<{rows: TRow[]; rowCount: number}>
@@ -45,7 +47,49 @@ export default class Db {
     this.useQueryCache = params.useQueryCache || false
   }
 
-  public async readAllPartitionMessagesOrderedById(partitionGroup: string, partitionSize: number): Promise<Map<string, Message[]>> {
+  public async readPartitionGroupMessagesOrderedById(
+    zeroBasedPage: number,
+    pageSize: number
+  ): Promise<Map<string, Message[]>> {
+    const param = valueCollector()
+    const query = `
+SELECT message_id,
+       partition_group,
+       partition_key,
+       content,
+       properties,
+       received_date
+  FROM (
+           SELECT *,
+                  ROW_NUMBER() OVER (
+                      PARTITION BY partition_group
+                      ORDER BY message_id
+                  ) AS row_number
+             FROM messages
+       ) AS t
+ WHERE row_number > ${param(zeroBasedPage * pageSize)} AND row_number <= ${param((zeroBasedPage + 1) * pageSize)}
+`
+    const result = await this.pool.query(query, param.values())
+    const messages = result.rows.map(buildMessage)
+
+    return messages.reduce((acc, message) => {
+      const {partitionGroup} = message
+      let bucket = acc.get(partitionGroup)
+      if (bucket === undefined) {
+        bucket = []
+        acc.set(partitionGroup, bucket)
+      }
+
+      bucket.push(message)
+
+      return acc
+    }, new Map<string, Message[]>())
+  }
+
+  public async readAllPartitionMessagesOrderedById(
+    partitionGroup: string,
+    partitionSize: number
+  ): Promise<Map<string, Message[]>> {
     const param = valueCollector()
     const query = `
 SELECT message_id,
@@ -91,7 +135,13 @@ SELECT message_id,
     const values = payloads
       .map(payload => {
         const {partitionGroup, partitionKey, content, properties, receivedDate} = payload
-        return `(${[param(partitionGroup), param(partitionKey), param(content), param(properties), param(receivedDate)].join(', ')})`
+        return `(${[
+          param(partitionGroup),
+          param(partitionKey),
+          param(content),
+          param(properties),
+          param(receivedDate)
+        ].join(', ')})`
       })
       .join(', ')
 

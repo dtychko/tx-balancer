@@ -145,6 +145,12 @@ export default class MessageStorage {
     return this.scheduleReadMessagesOrderedByIdTask(spec)
   }
 
+  public async readPartitionGroupMessagesOrderedById(spec: {zeroBasedPage: number; pageSize: number}): Promise<Map<string, Message[]>> {
+    // TODO: Add logging/diagnostics/errorHandling
+      const {zeroBasedPage, pageSize} = spec
+      return await this.db.readPartitionGroupMessagesOrderedById(zeroBasedPage, pageSize)
+  }
+
   public async readAllPartitionMessagesOrderedById(spec: {partitionGroup: string; partitionSize: number}): Promise<Map<string, Message[]>> {
     try {
       const {partitionGroup, partitionSize} = spec

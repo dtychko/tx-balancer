@@ -1,5 +1,5 @@
 import * as amqp from 'amqplib'
-import {MessageCache} from './balancer-core'
+import {Message, MessageCache} from './balancer-core'
 import MessageBalancer from './balancer-core-3/MessageBalancer'
 import {publishAsync} from './publishAsync'
 import PublishLoop from './publishLoop'
@@ -38,6 +38,9 @@ async function main() {
     onPartitionAdded: _ => publishLoop.trigger()
   })
   console.log('created BalancedQueue')
+
+  await messageBalancer.init()
+  console.log('initialized BalancedQueue')
 
   const qState = await createQState(qStateCh, () => publishLoop.trigger())
   console.log('created QState')
@@ -80,7 +83,10 @@ function createFakeStorage(): any {
       return {...data, messageId: messageId++} as any
     },
     removeMessage() {},
-    getMessage() {}
+    getMessage() {},
+    readPartitionGroupMessagesOrderedById() {
+      return Promise.resolve(new Map<string, Message[]>())
+    }
   }
 }
 

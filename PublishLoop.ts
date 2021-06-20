@@ -4,6 +4,7 @@ import {ConfirmChannel, MessageProperties} from 'amqplib'
 import {publishAsync} from './publishAsync'
 import {outputMirrorQueueName, partitionGroupHeader, partitionKeyHeader} from './config'
 import ExecutionSerializer from './balancer-core/MessageBalancer.Serializer'
+import {nanoid} from 'nanoid'
 
 export default class PublishLoop {
   private state = emptyState()
@@ -75,15 +76,16 @@ function connectedState(ch: ConfirmChannel, qState: QState, messageBalancer: Mes
           return
         }
 
-        const {messageId, partitionGroup, partitionKey} = messageRef
-        const {queueName} = qState.registerMessage(messageId.toString(), partitionGroup, partitionKey)
+        const {partitionGroup, partitionKey} = messageRef
+        const messageId = nanoid()
+        const {queueName} = qState.registerMessage(messageId, partitionGroup, partitionKey)
 
-        scheduleMessageProcessing(messageRef, queueName)
+        scheduleMessageProcessing(messageRef, messageId, queueName)
       }
     }
   }
 
-  async function scheduleMessageProcessing(messageRef: MessageRef, queueName: string) {
+  async function scheduleMessageProcessing(messageRef: MessageRef, messageId: string, queueName: string) {
     // TODO: Think about error handling
     // TODO: Serialize message resolution by partitionGroup
     const [, message] = await executor.serializeResolution(
@@ -92,7 +94,6 @@ function connectedState(ch: ConfirmChannel, qState: QState, messageBalancer: Mes
     )
     const {content, properties} = message
     const {partitionGroup, partitionKey} = messageRef
-    const messageId = messageRef.messageId.toString()
 
     await Promise.all([
       publishAsync(ch, '', outputMirrorQueueName(queueName), Buffer.from(''), {
