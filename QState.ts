@@ -1,4 +1,5 @@
 import {outputQueueName} from './config'
+import {nanoid} from 'nanoid'
 
 interface QueueSession {
   queueName: string
@@ -19,6 +20,9 @@ interface PartitionKeySession {
 }
 
 interface MessageSession {
+  messageId: string
+  mirrorDeliveryTag?: number
+  responseDeliveryTag?: number
   partitionKeySession: PartitionKeySession
 }
 
@@ -41,8 +45,6 @@ export class QState {
   private readonly singlePartitionGroupLimit: number
   private readonly singlePartitionKeyLimit: number
 
-  private readonly mirrorDeliveryTagsByMessageId = new Map<string, number>()
-  private readonly responseDeliveryTagsByMessageId = new Map<string, number>()
   private readonly messageSessionsByMessageId = new Map<string, MessageSession>()
   private readonly partitionGroupSessionsByPartitionGroup = new Map<string, PartitionGroupSession>()
   private readonly queueSessionsByQueueName = new Map<string, QueueSession>()
@@ -56,8 +58,8 @@ export class QState {
     this.singlePartitionGroupLimit = params.singlePartitionGroupLimit
     this.singlePartitionKeyLimit = params.singlePartitionKeyLimit
 
-    const queueNames = Array.from({length: params.queueCount}, (_, i) => outputQueueName(i + 1))
-    for (const queueName of queueNames) {
+    for (let i = 0; i < params.queueCount; i++) {
+      const queueName = outputQueueName(i + 1)
       const queueSession = {queueName, messageCount: 0}
       this.queueSessions.push(queueSession)
       this.queueSessionsByQueueName.set(queueName, queueSession)
@@ -115,30 +117,42 @@ export class QState {
     }
   }
 
-  public async registerMirrorDeliveryTag(messageId: string, deliveryTag: number) {
-    const responseDeliveryTag = this.responseDeliveryTagsByMessageId.get(messageId)
-    if (responseDeliveryTag !== undefined) {
-      this.responseDeliveryTagsByMessageId.delete(messageId)
-      await this.processMessage(messageId, deliveryTag, responseDeliveryTag)
-    } else {
-      this.mirrorDeliveryTagsByMessageId.set(messageId, deliveryTag)
+  public registerMirrorDeliveryTag(messageId: string, deliveryTag: number): {registered: boolean} {
+    const messageSession = this.messageSessionsByMessageId.get(messageId)
+    if (!messageSession) {
+      return {registered: false}
     }
+
+    messageSession.mirrorDeliveryTag = deliveryTag
+    if (messageSession.responseDeliveryTag !== undefined) {
+      this.processMessage(messageSession)
+    }
+
+    return {registered: true}
   }
 
-  public async registerResponseDeliveryTag(messageId: string, deliveryTag: number) {
-    const mirrorDeliveryTag = this.mirrorDeliveryTagsByMessageId.get(messageId)
-    if (mirrorDeliveryTag !== undefined) {
-      this.mirrorDeliveryTagsByMessageId.delete(messageId)
-      await this.processMessage(messageId, mirrorDeliveryTag, deliveryTag)
-    } else {
-      this.responseDeliveryTagsByMessageId.set(messageId, deliveryTag)
+  public registerResponseDeliveryTag(messageId: string, deliveryTag: number): {registered: boolean} {
+    const messageSession = this.messageSessionsByMessageId.get(messageId)
+    if (!messageSession) {
+      return {registered: false}
     }
+
+    messageSession.responseDeliveryTag = deliveryTag
+    if (messageSession.mirrorDeliveryTag !== undefined) {
+      this.processMessage(messageSession)
+    }
+
+    return {registered: true}
   }
 
   public restoreMessage(messageId: string, partitionGroup: string, partitionKey: string, queueName: string) {
-    const expectedQueueName = this.getQueueSession(partitionGroup).queueName
+    if (this.messageSessionsByMessageId.has(messageId)) {
+      throw new Error(
+        `Can't restore message#${messageId} because another message with the same id is already registered`
+      )
+    }
 
-    // TODO: Maybe move this check to the caller side and just log warning instead of throwing
+    const expectedQueueName = this.getQueueSession(partitionGroup).queueName
     if (queueName !== expectedQueueName) {
       throw new Error(
         `Can't bind partition group "${partitionGroup}" to queue "${queueName}" ` +
@@ -146,12 +160,22 @@ export class QState {
       )
     }
 
-    this.registerMessage(messageId, partitionGroup, partitionKey)
+    this.registerMessageSession(messageId, partitionGroup, partitionKey)
   }
 
-  public registerMessage(messageId: string, partitionGroup: string, partitionKey: string): {queueName: string} {
+  public registerMessage(partitionGroup: string, partitionKey: string): {queueMessageId: string; queueName: string} {
+    const messageId = nanoid()
+    return this.registerMessageSession(messageId, partitionGroup, partitionKey)
+  }
+
+  private registerMessageSession(
+    messageId: string,
+    partitionGroup: string,
+    partitionKey: string
+  ): {queueMessageId: string; queueName: string} {
     const partitionKeySession = this.getOrAddPartitionKeySession(partitionGroup, partitionKey)
     const messageSession = {
+      messageId,
       partitionKeySession
     }
 
@@ -162,7 +186,7 @@ export class QState {
 
     this.version += 1
 
-    return {queueName: partitionKeySession.partitionGroupSession.queueSession.queueName}
+    return {queueMessageId: messageId, queueName: partitionKeySession.partitionGroupSession.queueSession.queueName}
   }
 
   private getOrAddPartitionKeySession(partitionGroup: string, partitionKey: string): PartitionKeySession {
@@ -204,9 +228,13 @@ export class QState {
     return this.queueSessions[queueIndex]
   }
 
-  private async processMessage(messageId: string, mirrorDeliveryTag: number, responseDeliveryTag: number) {
-    const messageSession = this.messageSessionsByMessageId.get(messageId)!
-    const partitionKeySession = messageSession.partitionKeySession
+  private async processMessage(messageSession: MessageSession) {
+    const {messageId, mirrorDeliveryTag, responseDeliveryTag, partitionKeySession} = messageSession
+    if (mirrorDeliveryTag === undefined || responseDeliveryTag === undefined) {
+      console.error('Invalid message session state')
+      throw new Error('Invalid message session state')
+    }
+
     const partitionGroupSession = partitionKeySession.partitionGroupSession
     const queueSession = partitionGroupSession.queueSession
 

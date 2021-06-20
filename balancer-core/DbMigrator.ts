@@ -60,6 +60,7 @@ CREATE INDEX IF NOT EXISTS messages_partition_group_partition_key_message_id_idx
 
       await this.pool.query(query)
     } catch (error) {
+      console.error(error)
       this.logger.log({
         level: 'error',
         message: 'Unable to migrate postgres database',
@@ -80,6 +81,8 @@ CREATE INDEX IF NOT EXISTS messages_partition_group_partition_key_message_id_idx
         await this.ping()
         return
       } catch (error) {
+        console.error(error)
+
         if (attempt >= this.attemptLimit) {
           this.logger.log({
             level: 'error',

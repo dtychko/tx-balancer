@@ -1,0 +1,18 @@
+version: "3"
+
+services:
+  postgres:
+    image: postgres:12-alpine
+    container_name: balancer_postgres
+    ports:
+      - 5432:5432
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+
+  rabbit:
+    image: rabbitmq:management
+    container_name: balancer_rabbitmq
+    ports:
+      - 5673:5672
+      - 15673:15672

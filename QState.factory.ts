@@ -58,7 +58,10 @@ async function consumeMirrorQueue(ch: ConfirmChannel, qState: QState, queueName:
           const deliveryTag = msg.fields.deliveryTag
 
           if (isInitialized) {
-            qState.registerMirrorDeliveryTag(messageId, deliveryTag)
+            const {registered} = qState.registerMirrorDeliveryTag(messageId, deliveryTag)
+            if (!registered) {
+              ch.ack(msg)
+            }
             return
           }
 
@@ -88,7 +91,11 @@ async function consumeResponseQueue(ch: Channel, qState: QState) {
     handleMessage(msg => {
       const messageId = msg.properties.messageId
       const deliveryTag = msg.fields.deliveryTag
-      qState.registerResponseDeliveryTag(messageId, deliveryTag)
+      const {registered} = qState.registerResponseDeliveryTag(messageId, deliveryTag)
+
+      if (!registered) {
+        ch.ack(msg)
+      }
     }),
     {noAck: false}
   )

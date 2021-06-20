@@ -1,5 +1,5 @@
 import * as amqp from 'amqplib'
-import {Message, MessageCache} from './balancer-core'
+import {Db, Message, MessageCache, MessageStorage, migrateDb} from './balancer-core'
 import MessageBalancer from './balancer-core-3/MessageBalancer'
 import {publishAsync} from './publishAsync'
 import PublishLoop from './publishLoop'
@@ -13,9 +13,11 @@ import {
   outputQueueName,
   partitionGroupHeader,
   partitionKeyHeader,
+  postgresConnectionString, postgresPoolMax,
   responseQueueName
 } from './config'
 import {handleMessage} from './handleMessage'
+import {Pool} from 'pg'
 
 async function main() {
   const conn = await amqp.connect(amqpUri)
@@ -32,9 +34,19 @@ async function main() {
   const publishLoop = new PublishLoop()
   console.log('created PublishLoop')
 
+  const pool = new Pool({
+    connectionString: postgresConnectionString,
+    max: postgresPoolMax
+  })
+  await migrateDb({pool})
+  console.log('migrated DB')
+
+  const db = new Db({pool, useQueryCache: true})
+  const storage = new MessageStorage({db, batchSize: 100})
+  const cache = new MessageCache({maxSize: 1024 ** 3})
   const messageBalancer = new MessageBalancer({
-    storage: createFakeStorage(),
-    cache: new MessageCache(),
+    storage,
+    cache,
     onPartitionAdded: _ => publishLoop.trigger()
   })
   console.log('created BalancedQueue')

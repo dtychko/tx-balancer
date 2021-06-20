@@ -1,3 +1,6 @@
+export const postgresConnectionString = 'postgres://postgres:postgres@localhost:5432/postgres'
+export const postgresPoolMax = 2
+
 export const amqpUri = 'amqp://guest:guest@localhost:5672/'
 export const inputQueueName = '_tx_balancer_input'
 export const responseQueueName = '_tx_balancer_response'
