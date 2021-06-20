@@ -36,6 +36,7 @@ export default class MessageBalancer {
 
   public async init() {
     const pageSize = 1000
+    let messageCount = 0
 
     for (let zeroBasedPage = 0; ; zeroBasedPage++) {
       // TODO: Add contentSizeLimit
@@ -52,10 +53,13 @@ export default class MessageBalancer {
           this.partitionGroupQueue.enqueue(messageId, partitionGroup, partitionKey)
           this.cache.addMessage(message)
         }
+
+        messageCount += messages.length
       }
     }
 
     this.isInitialized = true
+    console.log(`MessageBalancer initialized with ${messageCount} messages`)
   }
 
   public async storeMessage(messageData: MessageData) {

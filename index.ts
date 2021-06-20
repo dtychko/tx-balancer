@@ -8,25 +8,31 @@ import {assertResources} from './assertResources'
 import {Channel, Connection} from 'amqplib'
 import {
   amqpUri,
+  inputChannelPrefetchCount,
   inputQueueName,
   outputQueueCount,
   outputQueueName,
   partitionGroupHeader,
   partitionKeyHeader,
-  postgresConnectionString, postgresPoolMax,
+  postgresConnectionString,
+  postgresPoolMax,
   responseQueueName
 } from './config'
 import {handleMessage} from './handleMessage'
 import {Pool} from 'pg'
 
 async function main() {
-  const conn = await amqp.connect(amqpUri)
+  const consumeConn = await amqp.connect(amqpUri)
+  const publishConn = await amqp.connect(amqpUri)
+  const fakeConn = await amqp.connect(amqpUri)
   console.log('connected to RabbitMQ')
 
-  const inputCh = await conn.createChannel()
-  const qStateCh = await conn.createConfirmChannel()
-  const loopCh = await conn.createConfirmChannel()
+  const inputCh = await consumeConn.createChannel()
+  const qStateCh = await consumeConn.createConfirmChannel()
+  const loopCh = await publishConn.createConfirmChannel()
   console.log('created channels')
+
+  await inputCh.prefetch(inputChannelPrefetchCount, false)
 
   await assertResources(qStateCh, true)
   console.log('asserted resources')
@@ -66,10 +72,10 @@ async function main() {
   publishLoop.trigger()
   console.log('started PublishLoop')
 
-  await startFakeClients(conn, outputQueueCount)
+  await startFakeClients(fakeConn, outputQueueCount)
   console.log('started fake clients')
 
-  await startFakePublisher(conn)
+  await startFakePublisher(fakeConn)
   console.log('started fake publisher')
 }
 
@@ -104,6 +110,7 @@ function createFakeStorage(): any {
 
 async function startFakePublisher(conn: Connection) {
   const publishCh = await conn.createConfirmChannel()
+  const content = Buffer.from(generateString(1024))
 
   for (let _ = 0; _ < 100; _++) {
     for (let i = 0; i < 10; i++) {
@@ -111,7 +118,7 @@ async function startFakePublisher(conn: Connection) {
 
       for (let j = 0; j <= 100; j++) {
         promises.push(
-          publishAsync(publishCh, '', inputQueueName, Buffer.from(`account/${i}/message/${j}`), {
+          publishAsync(publishCh, '', inputQueueName, content, {
             persistent: true,
             headers: {
               [partitionGroupHeader]: `account/${i}`,
@@ -136,7 +143,7 @@ async function startFakeClients(conn: Connection, count: number) {
         const messageId = msg.properties.messageId
 
         clientCh.ack(msg)
-        publishAsync(clientCh, '', responseQueueName, Buffer.from(generateString(1024)), {persistent: true, messageId})
+        publishAsync(clientCh, '', responseQueueName, Buffer.from(''), {persistent: true, messageId})
       }),
       {noAck: false}
     )
