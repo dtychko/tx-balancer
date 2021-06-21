@@ -73,8 +73,8 @@ async function main() {
   publishLoop.trigger()
   console.log('started PublishLoop')
 
-  // await startFakeClients(fakeConn, outputQueueCount)
-  // console.log('started fake clients')
+  await startFakeClients(fakeConn, outputQueueCount)
+  console.log('started fake clients')
 
   await startFakePublisher(fakeConn)
   console.log('started fake publisher')
@@ -123,7 +123,7 @@ async function startFakePublisher(conn: Connection) {
             persistent: true,
             headers: {
               [partitionGroupHeader]: `account/${i}`,
-              [partitionKeyHeader]: i % 2 === 0 ? 'even' : 'odd'
+              [partitionKeyHeader]: j % 2 === 0 ? 'even' : 'odd'
             }
           })
         )

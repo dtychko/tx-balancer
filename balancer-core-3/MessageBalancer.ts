@@ -35,36 +35,45 @@ export default class MessageBalancer {
   }
 
   public async init() {
-    const pageSize = 1000
+    const messageCountLimit = 10000
     let messageCount = 0
+    let fromRow = 1
+    let toRow = 1
+    let iteration
 
-    for (let zeroBasedPage = 0; ; zeroBasedPage++) {
-      const result = await this.storage.readPartitionGroupMessagesOrderedById({
-        zeroBasedPage,
-        pageSize,
+    console.log(await ((this.storage as any).db.readStats()))
+
+    for (iteration = 1; ; iteration++) {
+      const messages = await this.storage.readPartitionMessagesOrderedById({
+        fromRow,
+        toRow,
         contentSizeLimit: this.cache.maxSize - this.cache.size()
       })
 
-      if (!result.size) {
+      if (!messages.length) {
         break
       }
 
-      for (const [partitionGroup, messages] of result) {
-        for (const message of messages) {
-          const {messageId, partitionKey} = message
-          this.partitionGroupQueue.enqueue(messageId, partitionGroup, partitionKey)
+      const partitions = new Set<string>()
 
-          if (message.type === 'full') {
-            this.cache.addMessage(message)
-          }
+      for (const message of messages) {
+        const {messageId, partitionGroup, partitionKey} = message
+        this.partitionGroupQueue.enqueue(messageId, partitionGroup, partitionKey)
+
+        if (message.type === 'full') {
+          this.cache.addMessage(message)
         }
 
-        messageCount += messages.length
+        partitions.add(JSON.stringify({partitionGroup, partitionKey}))
       }
+
+      messageCount += messages.length
+      fromRow = toRow + 1
+      toRow = toRow + Math.max(1, Math.floor(messageCountLimit / partitions.size))
     }
 
     this.isInitialized = true
-    console.log(`MessageBalancer initialized with ${messageCount} messages`)
+    console.log(`MessageBalancer initialized with ${messageCount} messages after ${iteration} iterations`)
   }
 
   public async storeMessage(messageData: MessageData) {
@@ -95,8 +104,16 @@ export default class MessageBalancer {
   }
 
   public async removeMessage(messageId: number) {
+    if (messageId % 1000 === 0) {
+      console.log(`removeMessage(${messageId})`)
+    }
+
     this.assertInitialized()
     await this.storage.removeMessage(messageId)
+
+    if (messageId % 1000 === 0) {
+      console.log(`removeMessage(${messageId}) completed`)
+    }
   }
 
   private assertInitialized() {

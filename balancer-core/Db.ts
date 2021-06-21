@@ -5,14 +5,14 @@ export interface Pool {
 
 export type FullOrPartialMessage<TProp = unknown> =
   | ({
-  type: 'full'
-} & Message<TProp>)
+      type: 'full'
+    } & Message<TProp>)
   | {
-  type: 'partial'
-  messageId: number
-  partitionGroup: string
-  partitionKey: string
-}
+      type: 'partial'
+      messageId: number
+      partitionGroup: string
+      partitionKey: string
+    }
 
 export interface Message<TProp = unknown> extends MessageData<TProp> {
   messageId: number
@@ -56,11 +56,11 @@ export default class Db {
     this.useQueryCache = params.useQueryCache || false
   }
 
-  public async readPartitionGroupMessagesOrderedById(
-    zeroBasedPage: number,
-    pageSize: number,
+  public async readPartitionMessagesOrderedById(
+    fromRow: number,
+    toRow: number,
     totalContentSizeLimit: number
-  ): Promise<Map<string, FullOrPartialMessage[]>> {
+  ): Promise<FullOrPartialMessage[]> {
     const param = valueCollector()
     const sizeLimitParam = param(totalContentSizeLimit)
     const query = `
@@ -84,13 +84,13 @@ SELECT message_id,
                          ) AS row_number
                     FROM messages
                 ) AS t1
-         WHERE row_number > ${param(zeroBasedPage * pageSize)}
-           AND row_number <= ${param((zeroBasedPage + 1) * pageSize)}
+         WHERE row_number >= ${param(fromRow)}
+           AND row_number <= ${param(toRow)}
      ) AS t2
 ORDER BY message_id;
 `
     const result = await this.pool.query(query, param.values())
-    const messages = result.rows.map((row: any): FullOrPartialMessage => {
+    return result.rows.map((row: any): FullOrPartialMessage => {
       const isPartial = row.is_partial!!
 
       if (isPartial) {
@@ -112,19 +112,6 @@ ORDER BY message_id;
         receivedDate: row.received_date
       }
     })
-
-    return messages.reduce((acc, message) => {
-      const {partitionGroup} = message
-      let bucket = acc.get(partitionGroup)
-      if (bucket === undefined) {
-        bucket = []
-        acc.set(partitionGroup, bucket)
-      }
-
-      bucket.push(message)
-
-      return acc
-    }, new Map<string, FullOrPartialMessage[]>())
   }
 
   public async readAllPartitionMessagesOrderedById(
