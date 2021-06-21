@@ -1,9 +1,10 @@
 import * as amqp from 'amqplib'
 import {Db, Message, MessageCache, MessageStorage, migrateDb} from './balancer-core'
 import MessageBalancer from './balancer-core-3/MessageBalancer'
+import {emptyBuffer} from './constants'
 import {publishAsync} from './publishAsync'
 import PublishLoop from './publishLoop'
-import {createQState} from './QState.factory'
+import {createQState} from './QState.create'
 import {assertResources} from './assertResources'
 import {Channel, Connection} from 'amqplib'
 import {
@@ -60,20 +61,20 @@ async function main() {
   await messageBalancer.init()
   console.log('initialized BalancedQueue')
 
-  const qState = await createQState(qStateCh, () => publishLoop.trigger())
+  const qState = await createQState({ch: qStateCh, onMessageProcessed: () => publishLoop.trigger()})
   console.log('created QState')
 
   await consumeInputQueue(inputCh, messageBalancer)
   console.log('consumed input queue')
 
-  publishLoop.connectTo(loopCh, qState, messageBalancer)
+  publishLoop.connectTo({ch: loopCh, qState, messageBalancer})
   console.log('connected PublishLoop')
 
   publishLoop.trigger()
   console.log('started PublishLoop')
 
-  await startFakeClients(fakeConn, outputQueueCount)
-  console.log('started fake clients')
+  // await startFakeClients(fakeConn, outputQueueCount)
+  // console.log('started fake clients')
 
   await startFakePublisher(fakeConn)
   console.log('started fake publisher')
@@ -110,7 +111,7 @@ function createFakeStorage(): any {
 
 async function startFakePublisher(conn: Connection) {
   const publishCh = await conn.createConfirmChannel()
-  const content = Buffer.from(generateString(1024))
+  const content = Buffer.from(generateString(1 * 1024))
 
   for (let _ = 0; _ < 100; _++) {
     for (let i = 0; i < 10; i++) {
@@ -143,7 +144,7 @@ async function startFakeClients(conn: Connection, count: number) {
         const messageId = msg.properties.messageId
 
         clientCh.ack(msg)
-        publishAsync(clientCh, '', responseQueueName, Buffer.from(''), {persistent: true, messageId})
+        publishAsync(clientCh, '', responseQueueName, emptyBuffer, {persistent: true, messageId})
       }),
       {noAck: false}
     )

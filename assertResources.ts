@@ -1,5 +1,5 @@
 import {Channel} from 'amqplib'
-import {inputQueueName, outputMirrorQueueName, outputQueueCount, outputQueueName, responseQueueName} from './config'
+import {inputQueueName, mirrorQueueName, outputQueueCount, outputQueueName, responseQueueName} from './config'
 
 export async function assertResources(ch: Channel, purge: boolean) {
   await ch.assertQueue(inputQueueName, {durable: true})
@@ -16,7 +16,7 @@ export async function assertResources(ch: Channel, purge: boolean) {
 
   async function assertOutputQueue(ch: Channel, outputQueue: string) {
     await ch.assertQueue(outputQueue, {durable: true})
-    await ch.assertQueue(outputMirrorQueueName(outputQueue), {durable: true})
+    await ch.assertQueue(mirrorQueueName(outputQueue), {durable: true})
 
     if (purge) {
       await ch.purgeQueue(outputQueue)

@@ -1,4 +1,4 @@
-import Db, {Message, MessageData, ReadMessagesOrderedByIdSpec} from './Db'
+import Db, {FullOrPartialMessage, Message, MessageData, ReadMessagesOrderedByIdSpec} from './Db'
 import {emptyLogger, MessageBalancerLogger} from './MessageBalancer.Logger'
 import {emptyMetric, MessageBalancerSummaryMetric} from './MessageBalancer.Metrics'
 import {AsyncTask, createAsyncBatchProcessor} from './MessageStorage.BatchProcessor'
@@ -145,10 +145,10 @@ export default class MessageStorage {
     return this.scheduleReadMessagesOrderedByIdTask(spec)
   }
 
-  public async readPartitionGroupMessagesOrderedById(spec: {zeroBasedPage: number; pageSize: number}): Promise<Map<string, Message[]>> {
+  public async readPartitionGroupMessagesOrderedById(spec: {zeroBasedPage: number; pageSize: number; contentSizeLimit: number}): Promise<Map<string, FullOrPartialMessage[]>> {
     // TODO: Add logging/diagnostics/errorHandling
-      const {zeroBasedPage, pageSize} = spec
-      return await this.db.readPartitionGroupMessagesOrderedById(zeroBasedPage, pageSize)
+      const {zeroBasedPage, pageSize, contentSizeLimit} = spec
+      return await this.db.readPartitionGroupMessagesOrderedById(zeroBasedPage, pageSize, contentSizeLimit)
   }
 
   public async readAllPartitionMessagesOrderedById(spec: {partitionGroup: string; partitionSize: number}): Promise<Map<string, Message[]>> {

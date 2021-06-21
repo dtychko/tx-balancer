@@ -1,17 +1,17 @@
 import MessageBalancer, {MessageRef} from './balancer-core-3/MessageBalancer'
+import {emptyBuffer} from './constants'
 import {QState} from './qState'
 import {ConfirmChannel, MessageProperties} from 'amqplib'
 import {publishAsync} from './publishAsync'
-import {outputMirrorQueueName, partitionGroupHeader, partitionKeyHeader} from './config'
+import {mirrorQueueName, partitionGroupHeader, partitionKeyHeader} from './config'
 import ExecutionSerializer from './balancer-core/MessageBalancer.Serializer'
-import {nanoid} from 'nanoid'
 
 export default class PublishLoop {
   private state = emptyState()
   private inProgress = false
 
-  public connectTo(ch: ConfirmChannel, qState: QState, messageBalancer: MessageBalancer) {
-    this.state = connectedState(ch, qState, messageBalancer)
+  public connectTo(params: {ch: ConfirmChannel; qState: QState; messageBalancer: MessageBalancer}) {
+    this.state = connectedState(params)
   }
 
   public trigger() {
@@ -20,7 +20,12 @@ export default class PublishLoop {
     }
 
     this.inProgress = true
-    this.state.startLoop(() => {
+    this.state.startLoop(err => {
+      if (err) {
+        console.error(err)
+        process.exit(1)
+      }
+
       //
       // "inProgress" flag should be reset synchronously as soon as the current loop completed.
       // "await this.state.startLoop" continuation code won't run immediately,
@@ -55,59 +60,83 @@ export default class PublishLoop {
 
 function emptyState() {
   return {
-    startLoop: (onCompleted: () => void) => {
+    startLoop: (onCompleted: (err?: Error) => void) => {
       onCompleted()
       return Promise.resolve()
     }
   }
 }
 
-function connectedState(ch: ConfirmChannel, qState: QState, messageBalancer: MessageBalancer) {
+function connectedState(params: {ch: ConfirmChannel; qState: QState; messageBalancer: MessageBalancer}) {
+  const {ch, qState, messageBalancer} = params
   const executor = new ExecutionSerializer()
 
   return {
-    startLoop: async (onCompleted: () => void) => {
-      // TODO: Think about error handling
-      while (true) {
-        const messageRef = messageBalancer.tryDequeueMessage(partitionGroup => qState.canRegister(partitionGroup))
+    startLoop: async (onCompleted: (err?: Error) => void) => {
+      try {
+        for (let i = 1; ; i++) {
+          const messageRef = messageBalancer.tryDequeueMessage(partitionGroup => qState.canRegister(partitionGroup))
+          if (!messageRef) {
+            break
+          }
 
-        if (!messageRef) {
-          onCompleted()
-          return
+          const {partitionGroup, partitionKey} = messageRef
+          const {queueMessageId, queueName} = qState.registerMessage(partitionGroup, partitionKey)
+
+          scheduleMessageProcessing(messageRef, queueMessageId, queueName)
+
+          if (i % 5 === 0) {
+            // Let's sometimes give a chance to either
+            // messages for other partitionGroup to be enqueued to messageBalancer
+            // or empty slots for other partitionGroup to be appeared in QState
+            await setImmediateAsync()
+          }
         }
-
-        const {partitionGroup, partitionKey} = messageRef
-        const {queueMessageId, queueName} = qState.registerMessage(partitionGroup, partitionKey)
-
-        scheduleMessageProcessing(messageRef, queueMessageId, queueName)
+      } catch (err) {
+        onCompleted(err)
+        return
       }
+
+      onCompleted()
     }
   }
 
   async function scheduleMessageProcessing(messageRef: MessageRef, queueMessageId: string, queueName: string) {
-    const {messageId, partitionGroup, partitionKey} = messageRef
+    try {
+      const {messageId, partitionGroup, partitionKey} = messageRef
 
-    // TODO: Think about error handling
-    // TODO: Serialize message resolution by partitionGroup
-    const [, message] = await executor.serializeResolution('getMessage', messageBalancer.getMessage(messageId))
-    const {content, properties} = message
+      // TODO: Serialize message resolution by partitionGroup
+      // TODO: Preconditions:
+      // TODO:  * Improve ExecutionSerializer to cleanup serialization key registry to prevent memory leaks
+      const [, message] = await executor.serializeResolution('getMessage', messageBalancer.getMessage(messageId))
+      const {content, properties} = message
 
-    await Promise.all([
-      publishAsync(ch, '', outputMirrorQueueName(queueName), Buffer.from(''), {
-        headers: {
-          [partitionGroupHeader]: partitionGroup,
-          [partitionKeyHeader]: partitionKey
-        },
-        persistent: true,
-        messageId: queueMessageId
-      }),
-      publishAsync(ch, '', queueName, content, {
-        ...(properties as MessageProperties),
-        persistent: true,
-        messageId: queueMessageId
-      })
-    ])
+      await Promise.all([
+        publishAsync(ch, '', mirrorQueueName(queueName), emptyBuffer, {
+          headers: {
+            [partitionGroupHeader]: partitionGroup,
+            [partitionKeyHeader]: partitionKey
+          },
+          persistent: true,
+          messageId: queueMessageId
+        }),
+        publishAsync(ch, '', queueName, content, {
+          ...(properties as MessageProperties),
+          persistent: true,
+          messageId: queueMessageId
+        })
+      ])
 
-    await messageBalancer.removeMessage(messageId)
+      await messageBalancer.removeMessage(messageId)
+    } catch (err) {
+      console.error(err)
+      process.exit(1)
+    }
   }
+}
+
+async function setImmediateAsync() {
+  return new Promise(res => {
+    setImmediate(res)
+  })
 }

@@ -9,12 +9,16 @@ export function publishAsync(
 ) {
   return new Promise<void>((res, rej) => {
     // TODO: Handle "false" result with retries or another magic
-    ch.publish(exchange, routingKey, content, options, err => {
+    const result = ch.publish(exchange, routingKey, content, options, err => {
       if (err) {
         rej(err)
       } else {
         res()
       }
     })
+
+    // if (!result) {
+    //   console.error(`[CRITICAL] Unable to publish message because channel's write buffer is full`)
+    // }
   })
 }

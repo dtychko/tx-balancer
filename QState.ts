@@ -1,4 +1,3 @@
-import {outputQueueName} from './config'
 import {nanoid} from 'nanoid'
 
 interface QueueSession {
@@ -33,6 +32,8 @@ export interface PartitionGroupGuard {
 
 interface QStateParams {
   onMessageProcessed: (messageId: string, mirrorDeliveryTag: number, responseDeliveryTag: number) => void
+  partitionGroupHash: (partitionGroup: string) => number
+  outputQueueName: (oneBasedIndex: number) => string
   queueCount: number
   queueSizeLimit: number
   singlePartitionGroupLimit: number
@@ -41,6 +42,7 @@ interface QStateParams {
 
 export class QState {
   private readonly onMessageProcessed: QStateParams['onMessageProcessed']
+  private readonly partitionGroupHash: QStateParams['partitionGroupHash']
   private readonly queueSizeLimit: number
   private readonly singlePartitionGroupLimit: number
   private readonly singlePartitionKeyLimit: number
@@ -54,12 +56,13 @@ export class QState {
 
   constructor(params: QStateParams) {
     this.onMessageProcessed = params.onMessageProcessed
+    this.partitionGroupHash = params.partitionGroupHash
     this.queueSizeLimit = params.queueSizeLimit
     this.singlePartitionGroupLimit = params.singlePartitionGroupLimit
     this.singlePartitionKeyLimit = params.singlePartitionKeyLimit
 
-    for (let i = 0; i < params.queueCount; i++) {
-      const queueName = outputQueueName(i + 1)
+    for (let queueIndex = 1; queueIndex <= params.queueCount; queueIndex++) {
+      const queueName = params.outputQueueName(queueIndex)
       const queueSession = {queueName, messageCount: 0}
       this.queueSessions.push(queueSession)
       this.queueSessionsByQueueName.set(queueName, queueSession)
@@ -223,18 +226,12 @@ export class QState {
   }
 
   private getQueueSession(partitionGroup: string): QueueSession {
-    // Just sum partitionGroup char codes instead of calculating a complex hash
-    const queueIndex = sumCharCodes(partitionGroup) % this.queueSessions.length
+    const queueIndex = this.partitionGroupHash(partitionGroup) % this.queueSessions.length
     return this.queueSessions[queueIndex]
   }
 
   private async processMessage(messageSession: MessageSession) {
     const {messageId, mirrorDeliveryTag, responseDeliveryTag, partitionKeySession} = messageSession
-    if (mirrorDeliveryTag === undefined || responseDeliveryTag === undefined) {
-      console.error('Invalid message session state')
-      throw new Error('Invalid message session state')
-    }
-
     const partitionGroupSession = partitionKeySession.partitionGroupSession
     const queueSession = partitionGroupSession.queueSession
 
@@ -254,14 +251,11 @@ export class QState {
 
     this.version += 1
 
+    if (mirrorDeliveryTag === undefined || responseDeliveryTag === undefined) {
+      console.error('Invalid message session state')
+      return
+    }
+
     this.onMessageProcessed(messageId, mirrorDeliveryTag, responseDeliveryTag)
   }
-}
-
-function sumCharCodes(str: string) {
-  let sum = 0
-  for (let i = 0; i < str.length; i++) {
-    sum += str.charCodeAt(i)
-  }
-  return sum
 }

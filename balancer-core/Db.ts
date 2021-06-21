@@ -1,8 +1,17 @@
-import {addAbortSignal} from 'stream'
-
 export interface Pool {
   // tslint:disable-next-line:no-any
   query: <TRow = any>(queryText: string, values?: unknown[]) => Promise<{rows: TRow[]; rowCount: number}>
+}
+
+export type FullOrPartialMessage<TProp = unknown> =
+  | ({
+  type: 'full'
+} & Message<TProp>)
+  | {
+  type: 'partial'
+  messageId: number
+  partitionGroup: string
+  partitionKey: string
 }
 
 export interface Message<TProp = unknown> extends MessageData<TProp> {
@@ -49,28 +58,60 @@ export default class Db {
 
   public async readPartitionGroupMessagesOrderedById(
     zeroBasedPage: number,
-    pageSize: number
-  ): Promise<Map<string, Message[]>> {
+    pageSize: number,
+    totalContentSizeLimit: number
+  ): Promise<Map<string, FullOrPartialMessage[]>> {
     const param = valueCollector()
+    const sizeLimitParam = param(totalContentSizeLimit)
     const query = `
 SELECT message_id,
        partition_group,
        partition_key,
-       content,
-       properties,
-       received_date
+       CASE WHEN total_content_size < ${sizeLimitParam} THEN False ELSE True END AS is_partial,
+       CASE WHEN total_content_size < ${sizeLimitParam} THEN received_date ELSE NULL END AS received_date,
+       CASE WHEN total_content_size < ${sizeLimitParam} THEN content ELSE NULL END AS content,
+       CASE WHEN total_content_size < ${sizeLimitParam} THEN properties ELSE NULL END AS properties
   FROM (
-           SELECT *,
-                  ROW_NUMBER() OVER (
-                      PARTITION BY partition_group
-                      ORDER BY message_id
-                  ) AS row_number
-             FROM messages
-       ) AS t
- WHERE row_number > ${param(zeroBasedPage * pageSize)} AND row_number <= ${param((zeroBasedPage + 1) * pageSize)}
+         SELECT *,
+                SUM(octet_length(content)) OVER (
+                    ORDER BY row_number, message_id
+                ) AS total_content_size
+           FROM (
+                  SELECT *,
+                         ROW_NUMBER() OVER (
+                             PARTITION BY partition_group, partition_key
+                             ORDER BY message_id
+                         ) AS row_number
+                    FROM messages
+                ) AS t1
+         WHERE row_number > ${param(zeroBasedPage * pageSize)}
+           AND row_number <= ${param((zeroBasedPage + 1) * pageSize)}
+     ) AS t2
+ORDER BY message_id;
 `
     const result = await this.pool.query(query, param.values())
-    const messages = result.rows.map(buildMessage)
+    const messages = result.rows.map((row: any): FullOrPartialMessage => {
+      const isPartial = row.is_partial!!
+
+      if (isPartial) {
+        return {
+          type: 'partial',
+          messageId: row.message_id,
+          partitionGroup: row.partition_group,
+          partitionKey: row.partition_key
+        }
+      }
+
+      return {
+        type: 'full',
+        messageId: row.message_id,
+        partitionGroup: row.partition_group,
+        partitionKey: row.partition_key,
+        content: row.content,
+        properties: row.properties === null ? undefined : row.properties,
+        receivedDate: row.received_date
+      }
+    })
 
     return messages.reduce((acc, message) => {
       const {partitionGroup} = message
@@ -83,7 +124,7 @@ SELECT message_id,
       bucket.push(message)
 
       return acc
-    }, new Map<string, Message[]>())
+    }, new Map<string, FullOrPartialMessage[]>())
   }
 
   public async readAllPartitionMessagesOrderedById(

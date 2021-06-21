@@ -1,6 +1,6 @@
 export default class Centrifuge<TValue> {
   private readonly partitions = new Map<string, Partition<TValue>>()
-  private readonly partitionQueue = new PartitionQueue<TValue>()
+  private readonly partitionQueue = new LinkedListQueue<Partition<TValue>>()
   private valueCount = 0
 
   public size() {
@@ -22,10 +22,12 @@ export default class Centrifuge<TValue> {
   }
 
   public tryDequeue(predicate: (partitionKey: string) => boolean): {value: TValue; partitionKey: string} | undefined {
-    const partition = this.partitionQueue.tryDequeue(predicate)
-    if (!partition) {
+    const dequeued = this.partitionQueue.tryDequeue(p => predicate(p.partitionKey))
+    if (!dequeued) {
       return undefined
     }
+
+    const partition = dequeued.value
 
     if (partition.size() > 1) {
       this.partitionQueue.enqueue(partition)
@@ -66,20 +68,60 @@ class Partition<TValue> {
   }
 }
 
-class PartitionQueue<TValue> {
-  private readonly queue: Partition<TValue>[] = []
+interface LinkedListNode<TValue> {
+  value: TValue
+  next: LinkedListNode<TValue> | undefined
+}
 
-  public enqueue(partition: Partition<TValue>) {
-    this.queue.push(partition)
+class LinkedListQueue<TValue> {
+  private head: LinkedListNode<TValue> | undefined = undefined
+  private tail: LinkedListNode<TValue> | undefined = undefined
+
+  public enqueue(value: TValue) {
+    if (!this.head) {
+      this.head = this.tail = {value, next: undefined}
+    } else {
+      const node = {value, next: undefined}
+      this.tail!.next = node
+      this.tail = node
+    }
   }
 
-  public tryDequeue(predicate: (partitionKey: string) => boolean): Partition<TValue> | undefined {
-    const index = this.queue.findIndex(p => predicate(p.partitionKey))
-    if (index === -1) {
+  public dequeue(): {value: TValue} {
+    const value = this.head!.value
+
+    if (this.head === this.tail) {
+      this.head = this.tail = undefined
+    } else {
+      this.head = this.head!.next
+    }
+
+    return {value}
+  }
+
+  public tryDequeue(predicate: (value: TValue) => boolean): {value: TValue} | undefined {
+    if (!this.head) {
       return undefined
     }
 
-    const [partition] = this.queue.splice(index, 1)
-    return partition
+    if (predicate(this.head.value)) {
+      return this.dequeue()
+    }
+
+    let curr = this.head.next
+    let prev = this.head
+
+    while (curr) {
+      if (predicate(curr.value)) {
+        prev.next = curr.next
+        curr.next = undefined
+        return {value: curr.value}
+      }
+
+      prev = curr
+      curr = curr.next
+    }
+
+    return undefined
   }
 }

@@ -6,8 +6,8 @@ export const inputQueueName = '_tx_balancer_input'
 export const responseQueueName = '_tx_balancer_response'
 export const inputChannelPrefetchCount = 500
 
-export const outputQueueName = (index: number) => `_tx_balancer_output_${index}`
-export const outputMirrorQueueName = (outputQueue: string) => `${outputQueue}.mirror`
+export const outputQueueName = (oneBasedIndex: number) => `_tx_balancer_output_${oneBasedIndex}`
+export const mirrorQueueName = (outputQueue: string) => `${outputQueue}.mirror`
 
 export const partitionGroupHeader = 'x-partition-group'
 export const partitionKeyHeader = 'x-partition-key'

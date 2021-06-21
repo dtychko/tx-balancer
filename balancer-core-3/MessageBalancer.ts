@@ -39,9 +39,11 @@ export default class MessageBalancer {
     let messageCount = 0
 
     for (let zeroBasedPage = 0; ; zeroBasedPage++) {
-      // TODO: Add contentSizeLimit
-      // TODO: Don't fetch content at all if cache is already full
-      const result = await this.storage.readPartitionGroupMessagesOrderedById({zeroBasedPage, pageSize})
+      const result = await this.storage.readPartitionGroupMessagesOrderedById({
+        zeroBasedPage,
+        pageSize,
+        contentSizeLimit: this.cache.maxSize - this.cache.size()
+      })
 
       if (!result.size) {
         break
@@ -51,7 +53,10 @@ export default class MessageBalancer {
         for (const message of messages) {
           const {messageId, partitionKey} = message
           this.partitionGroupQueue.enqueue(messageId, partitionGroup, partitionKey)
-          this.cache.addMessage(message)
+
+          if (message.type === 'full') {
+            this.cache.addMessage(message)
+          }
         }
 
         messageCount += messages.length
