@@ -80,8 +80,8 @@ function connectedState(params: {ch: ConfirmChannel; qState: QState; messageBala
           const messageRef = messageBalancer.tryDequeueMessage(partitionGroup => qState.canRegister(partitionGroup))
           if (!messageRef) {
             if (messageBalancer.size() && !qState.size()) {
-              console.log('WARN')
-              // const messageRef2 = messageBalancer.tryDequeueMessage(partitionGroup => qState.canRegister(partitionGroup))
+              console.error(`[Critical] Unpublished messages left: ${messageBalancer.size()} messages`)
+              process.exit(1)
             }
 
             break

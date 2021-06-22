@@ -84,8 +84,8 @@ async function main() {
   await startFakeClients(fakeConn, outputQueueCount)
   console.log('started fake clients')
 
-  await startFakePublisher(fakeConn)
-  console.log('started fake publisher')
+  const publishedCount = await startFakePublisher(fakeConn)
+  console.log(`started fake publisher ${publishedCount}`)
 
   setInterval(async () => {
     console.log(await db.readStats())
@@ -109,26 +109,12 @@ async function consumeInputQueue(ch: Channel, messageBalancer: MessageBalancer) 
   )
 }
 
-function createFakeStorage(): any {
-  let messageId = 1
-
-  return {
-    createMessage(data: any) {
-      return {...data, messageId: messageId++} as any
-    },
-    removeMessage() {},
-    getMessage() {},
-    readPartitionGroupMessagesOrderedById() {
-      return Promise.resolve(new Map<string, Message[]>())
-    }
-  }
-}
-
 async function startFakePublisher(conn: Connection) {
   const publishCh = await conn.createConfirmChannel()
   const content = Buffer.from(generateString(1 * 1024))
+  let count = 0
 
-  for (let _ = 0; _ < 11; _++) {
+  for (let _ = 0; _ < 100; _++) {
     for (let i = 0; i < 10; i++) {
       const promises = [] as Promise<void>[]
 
@@ -142,11 +128,15 @@ async function startFakePublisher(conn: Connection) {
             }
           })
         )
+
+        count += 1
       }
 
       await Promise.all(promises)
     }
   }
+
+  return count
 }
 
 async function startFakeClients(conn: Connection, count: number) {

@@ -40,14 +40,10 @@ export default class MessageBalancer {
 
   public async init() {
     const messageCountLimit = 10000
-    let messageCount = 0
+    const startedAt = Date.now()
     let fromRow = 1
     let toRow = 1
     let iteration
-
-    console.log(await ((this.storage as any).db.readStats()))
-
-    const mIdSet = new Set<number>()
 
     for (iteration = 1; ; iteration++) {
       const messages = await this.storage.readPartitionMessagesOrderedById({
@@ -71,18 +67,16 @@ export default class MessageBalancer {
         }
 
         partitions.add(JSON.stringify({partitionGroup, partitionKey}))
-
-        mIdSet.add(messageId)
       }
 
-      messageCount += messages.length
       fromRow = toRow + 1
       toRow = toRow + Math.max(1, Math.floor(messageCountLimit / partitions.size))
     }
 
     this.isInitialized = true
-    console.log(`MessageBalancer initialized with ${messageCount} messages after ${iteration} iterations`)
-    console.log(mIdSet.size)
+
+    const duration = Date.now() - startedAt
+    console.log(`MessageBalancer initialized with ${this.partitionGroupQueue.size()} messages after ${iteration} iterations in ${duration} ms`)
   }
 
   public async storeMessage(messageData: MessageData) {
@@ -115,7 +109,6 @@ export default class MessageBalancer {
   public removedCount = 0
 
   public async removeMessage(messageId: number) {
-    // TODO: Looks like removeMessage method called more often than expected!
     this.removedCount += 1
 
     this.assertInitialized()

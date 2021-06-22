@@ -17,9 +17,6 @@ export default class Centrifuge<TValue> {
 
     partition.enqueue(value)
     this.valueCount += 1
-    if (this.valueCount && this.partitionQueue.isEmpty()) {
-      console.log('CRITICAL enqueue')
-    }
 
     return partition.size()
   }
@@ -39,9 +36,6 @@ export default class Centrifuge<TValue> {
     }
 
     this.valueCount -= 1
-    if (this.valueCount && this.partitionQueue.isEmpty()) {
-      console.log(`CRITICAL tryDequeue ${this.valueCount} ${partition.size()}`)
-    }
 
     return {
       value: partition.dequeue(),
@@ -79,7 +73,7 @@ interface LinkedListNode<TValue> {
   next: LinkedListNode<TValue> | undefined
 }
 
-class LinkedListQueue<TValue> {
+export class LinkedListQueue<TValue> {
   private head: LinkedListNode<TValue> | undefined = undefined
   private tail: LinkedListNode<TValue> | undefined = undefined
 
@@ -88,7 +82,7 @@ class LinkedListQueue<TValue> {
   }
 
   public enqueue(value: TValue) {
-    if (!this.head) {
+    if (this.head === undefined) {
       this.head = this.tail = {value, next: undefined}
     } else {
       const node = {value, next: undefined}
@@ -98,11 +92,11 @@ class LinkedListQueue<TValue> {
   }
 
   public dequeue(): {value: TValue} {
-    if (!this.head || !this.tail) {
+    if (this.head === undefined) {
       throw new Error('Queue is empty!')
     }
 
-    const value = this.head!.value
+    const value = this.head.value
 
     if (this.head === this.tail) {
       this.head = this.tail = undefined
@@ -114,7 +108,7 @@ class LinkedListQueue<TValue> {
   }
 
   public tryDequeue(predicate: (value: TValue) => boolean): {value: TValue} | undefined {
-    if (!this.head) {
+    if (this.head === undefined) {
       return undefined
     }
 
@@ -127,8 +121,16 @@ class LinkedListQueue<TValue> {
 
     while (curr) {
       if (predicate(curr.value)) {
-        prev.next = curr.next
-        curr.next = undefined
+        if (curr.next) {
+          // curr is an intermediate node, just remove it
+          prev.next = curr.next
+          curr.next = undefined
+        } else {
+          // curr is a tail node, remove it and set tail to prev
+          prev.next = undefined
+          this.tail = prev
+        }
+
         return {value: curr.value}
       }
 
