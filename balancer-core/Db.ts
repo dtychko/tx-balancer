@@ -61,10 +61,12 @@ export default class Db {
     toRow: number,
     totalContentSizeLimit: number
   ): Promise<FullOrPartialMessage[]> {
-    const param = valueCollector()
+    const [query, values] = totalContentSizeLimit ? fullQuery() : partialQuery()
+    const result = await this.pool.query(query, values)
+    return result.rows.map(buildFullOrPartialMessage)
 
     function partialQuery() {
-      return `
+      return psql`
 SELECT message_id,
        partition_group,
        partition_key,
@@ -77,22 +79,21 @@ SELECT message_id,
                 ) AS row_number
            FROM messages
        ) AS t1
- WHERE row_number >= ${param(fromRow)}
-   AND row_number <= ${param(toRow)}
+ WHERE row_number >= ${fromRow}
+   AND row_number <= ${toRow}
 ORDER BY message_id;
 `
     }
 
     function fullQuery() {
-      const sizeLimitParam = param(totalContentSizeLimit)
-      return `
+      return psql`
 SELECT message_id,
        partition_group,
        partition_key,
-       CASE WHEN total_content_size < ${sizeLimitParam} THEN False ELSE True END AS is_partial,
-       CASE WHEN total_content_size < ${sizeLimitParam} THEN received_date ELSE NULL END AS received_date,
-       CASE WHEN total_content_size < ${sizeLimitParam} THEN content ELSE NULL END AS content,
-       CASE WHEN total_content_size < ${sizeLimitParam} THEN properties ELSE NULL END AS properties
+       CASE WHEN total_content_size < ${totalContentSizeLimit} THEN False ELSE True END AS is_partial,
+       CASE WHEN total_content_size < ${totalContentSizeLimit} THEN received_date ELSE NULL END AS received_date,
+       CASE WHEN total_content_size < ${totalContentSizeLimit} THEN content ELSE NULL END AS content,
+       CASE WHEN total_content_size < ${totalContentSizeLimit} THEN properties ELSE NULL END AS properties
   FROM (
          SELECT *,
                 SUM(octet_length(content)) OVER (
@@ -106,16 +107,14 @@ SELECT message_id,
                          ) AS row_number
                     FROM messages
                 ) AS t1
-         WHERE row_number >= ${param(fromRow)}
-           AND row_number <= ${param(toRow)}
+         WHERE row_number >= ${fromRow}
+           AND row_number <= ${toRow}
      ) AS t2
 ORDER BY message_id;
 `
     }
 
-    const query = totalContentSizeLimit ? fullQuery() : partialQuery()
-    const result = await this.pool.query(query, param.values())
-    return result.rows.map((row: any): FullOrPartialMessage => {
+    function buildFullOrPartialMessage(row: any): FullOrPartialMessage {
       const isPartial = row.is_partial!!
 
       if (isPartial) {
@@ -136,7 +135,7 @@ ORDER BY message_id;
         properties: row.properties === null ? undefined : row.properties,
         receivedDate: row.received_date
       }
-    })
+    }
   }
 
   public async readAllPartitionMessagesOrderedById(
@@ -498,4 +497,17 @@ function parameterGenerator() {
     params,
     count
   }
+}
+
+function psql(strings: TemplateStringsArray, ...args: unknown[]): [string, unknown[]] {
+  const values = []
+  let sql = ''
+
+  for (let i = 0; i < strings.length - 1; i++) {
+    sql += strings[i] + `$${values.push(args[i])}`
+  }
+
+  sql += strings[strings.length - 1]
+
+  return [sql, values]
 }
