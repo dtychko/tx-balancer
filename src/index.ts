@@ -23,6 +23,7 @@ import {
 } from './config'
 import {handleMessage} from './amqp/handleMessage'
 import {Pool} from 'pg'
+import {Publisher} from './amqp/Publisher'
 
 process.on('uncaughtException', err => {
   console.error('[CRITICAL] uncaughtException: ' + err)
@@ -80,7 +81,7 @@ async function main() {
   await consumeInputQueue(inputCh, messageBalancer)
   console.log('consumed input queue')
 
-  publishLoop.connectTo({ch: loopCh, qState, messageBalancer})
+  publishLoop.connectTo({publisher: new Publisher(loopCh), qState, messageBalancer})
   console.log('connected PublishLoop')
 
   publishLoop.trigger()
@@ -117,16 +118,17 @@ async function consumeInputQueue(ch: Channel, messageBalancer: MessageBalancer3)
 
 async function startFakePublisher(conn: Connection) {
   const publishCh = await conn.createConfirmChannel()
-  const content = Buffer.from(generateString(1 * 1024))
+  const publisher = new Publisher(publishCh)
+  const content = Buffer.from(generateString(100 * 1024))
   let count = 0
 
-  for (let _ = 0; _ < 100; _++) {
+  for (let _ = 0; _ < 20; _++) {
     for (let i = 0; i < 10; i++) {
       const promises = [] as Promise<void>[]
 
       for (let j = 0; j <= 100; j++) {
         promises.push(
-          publishAsync(publishCh, '', inputQueueName, content, {
+          publisher.publishAsync('', inputQueueName, content, {
             persistent: true,
             headers: {
               [partitionGroupHeader]: `account/${i}`,
@@ -147,6 +149,7 @@ async function startFakePublisher(conn: Connection) {
 
 async function startFakeClients(conn: Connection, count: number) {
   const clientCh = await conn.createConfirmChannel()
+  const publisher = new Publisher(clientCh)
 
   for (let i = 0; i < count; i++) {
     await clientCh.consume(
@@ -155,7 +158,7 @@ async function startFakeClients(conn: Connection, count: number) {
         const messageId = msg.properties.messageId
 
         clientCh.ack(msg)
-        publishAsync(clientCh, '', responseQueueName, emptyBuffer, {persistent: true, messageId})
+        publisher.publishAsync('', responseQueueName, emptyBuffer, {persistent: true, messageId})
       }),
       {noAck: false}
     )

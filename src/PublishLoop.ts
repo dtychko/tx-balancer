@@ -2,15 +2,15 @@ import ExecutionSerializer from '@targetprocess/balancer-core/bin/MessageBalance
 import MessageBalancer3, {MessageRef} from './balancing/MessageBalancer3'
 import {emptyBuffer} from './constants'
 import {QState} from './qState'
-import {ConfirmChannel, MessageProperties} from 'amqplib'
-import {publishAsync} from './amqp/publishAsync'
+import {MessageProperties} from 'amqplib'
 import {mirrorQueueName, partitionGroupHeader, partitionKeyHeader} from './config'
+import {Publisher} from './amqp/Publisher'
 
 export default class PublishLoop {
   private state = emptyState()
   private inProgress = false
 
-  public connectTo(params: {ch: ConfirmChannel; qState: QState; messageBalancer: MessageBalancer3}) {
+  public connectTo(params: {publisher: Publisher; qState: QState; messageBalancer: MessageBalancer3}) {
     this.state = connectedState(params)
   }
 
@@ -67,8 +67,8 @@ function emptyState() {
   }
 }
 
-function connectedState(params: {ch: ConfirmChannel; qState: QState; messageBalancer: MessageBalancer3}) {
-  const {ch, qState, messageBalancer} = params
+function connectedState(params: {publisher: Publisher; qState: QState; messageBalancer: MessageBalancer3}) {
+  const {publisher, qState, messageBalancer} = params
   const executor = new ExecutionSerializer()
 
   return {
@@ -117,7 +117,7 @@ function connectedState(params: {ch: ConfirmChannel; qState: QState; messageBala
       const {content, properties} = message
 
       await Promise.all([
-        publishAsync(ch, '', mirrorQueueName(queueName), emptyBuffer, {
+        publisher.publishAsync('', mirrorQueueName(queueName), emptyBuffer, {
           headers: {
             [partitionGroupHeader]: partitionGroup,
             [partitionKeyHeader]: partitionKey
@@ -125,7 +125,7 @@ function connectedState(params: {ch: ConfirmChannel; qState: QState; messageBala
           persistent: true,
           messageId: queueMessageId
         }),
-        publishAsync(ch, '', queueName, content, {
+        publisher.publishAsync('', queueName, content, {
           ...(properties as MessageProperties),
           persistent: true,
           messageId: queueMessageId
