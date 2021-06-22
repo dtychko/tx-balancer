@@ -1,9 +1,9 @@
 import * as amqp from 'amqplib'
-import {Db, Message, MessageCache, MessageStorage, migrateDb} from './balancer-core'
+import {Db, MessageCache, MessageStorage, migrateDb} from './balancer-core'
 import MessageBalancer from './balancer-core-3/MessageBalancer'
 import {emptyBuffer} from './constants'
 import {publishAsync} from './publishAsync'
-import PublishLoop, {scheduledProcessingCount} from './publishLoop'
+import PublishLoop from './publishLoop'
 import {createQState} from './QState.create'
 import {assertResources} from './assertResources'
 import {Channel, Connection} from 'amqplib'
@@ -66,7 +66,7 @@ async function main() {
   })
   console.log('created BalancedQueue')
 
-  await messageBalancer.init()
+  await messageBalancer.init({perRequestMessageCountLimit: 10000, initCache: true})
   console.log('initialized BalancedQueue')
 
   const qState = await createQState({ch: qStateCh, onMessageProcessed: () => publishLoop.trigger()})
@@ -88,10 +88,11 @@ async function main() {
   console.log(`started fake publisher ${publishedCount}`)
 
   setInterval(async () => {
-    console.log(await db.readStats())
-    console.log({size: messageBalancer.size(), removedCount: messageBalancer.removedCount})
-    console.log({size: qState.size()})
-    console.log({scheduledProcessingCount})
+    console.log({
+      dbMessageCount: (await db.readStats()).messageCount,
+      messageBalancerSize: messageBalancer.size(),
+      qStateSize: qState.size()
+    })
   }, 3000)
 }
 

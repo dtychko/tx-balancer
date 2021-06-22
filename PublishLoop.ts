@@ -67,8 +67,6 @@ function emptyState() {
   }
 }
 
-export let scheduledProcessingCount = 0
-
 function connectedState(params: {ch: ConfirmChannel; qState: QState; messageBalancer: MessageBalancer}) {
   const {ch, qState, messageBalancer} = params
   const executor = new ExecutionSerializer()
@@ -109,8 +107,6 @@ function connectedState(params: {ch: ConfirmChannel; qState: QState; messageBala
   }
 
   async function scheduleMessageProcessing(messageRef: MessageRef, queueMessageId: string, queueName: string) {
-    scheduledProcessingCount += 1
-
     try {
       const {messageId, partitionGroup, partitionKey} = messageRef
 

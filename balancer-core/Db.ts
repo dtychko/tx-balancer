@@ -62,8 +62,30 @@ export default class Db {
     totalContentSizeLimit: number
   ): Promise<FullOrPartialMessage[]> {
     const param = valueCollector()
-    const sizeLimitParam = param(totalContentSizeLimit)
-    const query = `
+
+    function partialQuery() {
+      return `
+SELECT message_id,
+       partition_group,
+       partition_key,
+       True AS is_partial
+  FROM (
+         SELECT *,
+                ROW_NUMBER() OVER (
+                    PARTITION BY partition_group, partition_key
+                    ORDER BY message_id
+                ) AS row_number
+           FROM messages
+       ) AS t1
+ WHERE row_number >= ${param(fromRow)}
+   AND row_number <= ${param(toRow)}
+ORDER BY message_id;
+`
+    }
+
+    function fullQuery() {
+      const sizeLimitParam = param(totalContentSizeLimit)
+      return `
 SELECT message_id,
        partition_group,
        partition_key,
@@ -89,6 +111,9 @@ SELECT message_id,
      ) AS t2
 ORDER BY message_id;
 `
+    }
+
+    const query = totalContentSizeLimit ? fullQuery() : partialQuery()
     const result = await this.pool.query(query, param.values())
     return result.rows.map((row: any): FullOrPartialMessage => {
       const isPartial = row.is_partial!!

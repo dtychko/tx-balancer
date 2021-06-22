@@ -1,4 +1,4 @@
-import {LinkedListQueue} from './Centrifuge'
+import {LinkedListQueue} from './LinkedListQueue'
 
 const queue = new LinkedListQueue<number>()
 

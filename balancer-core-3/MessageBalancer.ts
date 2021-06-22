@@ -38,19 +38,16 @@ export default class MessageBalancer {
     return this.partitionGroupQueue.size()
   }
 
-  public async init() {
-    const messageCountLimit = 10000
+  public async init(params: {perRequestMessageCountLimit: number; initCache: boolean}) {
+    const {perRequestMessageCountLimit, initCache} = params
     const startedAt = Date.now()
     let fromRow = 1
     let toRow = 1
     let iteration
 
     for (iteration = 1; ; iteration++) {
-      const messages = await this.storage.readPartitionMessagesOrderedById({
-        fromRow,
-        toRow,
-        contentSizeLimit: this.cache.maxSize - this.cache.size()
-      })
+      const contentSizeLimit = initCache ? this.cache.maxSize - this.cache.size() : 0
+      const messages = await this.storage.readPartitionMessagesOrderedById({fromRow, toRow, contentSizeLimit})
 
       if (!messages.length) {
         break
@@ -70,13 +67,15 @@ export default class MessageBalancer {
       }
 
       fromRow = toRow + 1
-      toRow = toRow + Math.max(1, Math.floor(messageCountLimit / partitions.size))
+      toRow = toRow + Math.max(1, Math.floor(perRequestMessageCountLimit / partitions.size))
     }
 
     this.isInitialized = true
 
     const duration = Date.now() - startedAt
-    console.log(`MessageBalancer initialized with ${this.partitionGroupQueue.size()} messages after ${iteration} iterations in ${duration} ms`)
+    console.log(
+      `MessageBalancer initialized with ${this.partitionGroupQueue.size()} messages after ${iteration} iterations in ${duration} ms`
+    )
   }
 
   public async storeMessage(messageData: MessageData) {
@@ -106,11 +105,7 @@ export default class MessageBalancer {
     return this.cache.getAndRemoveMessage(messageId) || (await this.storage.readMessage(messageId))!
   }
 
-  public removedCount = 0
-
   public async removeMessage(messageId: number) {
-    this.removedCount += 1
-
     this.assertInitialized()
     await this.storage.removeMessage(messageId)
   }
