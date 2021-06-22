@@ -69,6 +69,10 @@ export class QState {
     }
   }
 
+  public size() {
+    return this.messageSessionsByMessageId.size
+  }
+
   public canRegister(partitionGroup: string): PartitionGroupGuard {
     const capturedVersion = this.version
     const partitionGroupSession = this.partitionGroupSessionsByPartitionGroup.get(partitionGroup)

@@ -5,6 +5,12 @@ export default class PartitionGroupQueue {
   private readonly partitionGroupCentrifuges = new Map<string, Centrifuge<number>>()
   private readonly partitionGroupQueue = [] as {partitionGroup: string; centrifuge: Centrifuge<number>}[]
 
+  private messageCount = 0
+
+  public size() {
+    return this.messageCount
+  }
+
   public enqueue(messageId: number, partitionGroup: string, partitionKey: string): {partitionKeyAdded: boolean} {
     let centrifuge = this.partitionGroupCentrifuges.get(partitionGroup)
 
@@ -15,6 +21,7 @@ export default class PartitionGroupQueue {
     }
 
     const partitionSize = centrifuge.enqueue(messageId, partitionKey)
+    this.messageCount += 1
 
     return {
       partitionKeyAdded: partitionSize === 1
@@ -28,7 +35,7 @@ export default class PartitionGroupQueue {
       const {partitionGroup, centrifuge} = this.partitionGroupQueue[i]
       const guard = canProcess(partitionGroup)
 
-      if (!guard.canProcessPartitionGroup) {
+      if (!guard.canProcessPartitionGroup()) {
         continue
       }
 
@@ -36,6 +43,7 @@ export default class PartitionGroupQueue {
 
       if (dequeued) {
         this.partitionGroupQueue.splice(i, 1)
+        this.messageCount -= 1
 
         if (centrifuge.size()) {
           this.partitionGroupQueue.push({partitionGroup, centrifuge})

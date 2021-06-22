@@ -34,6 +34,10 @@ export default class MessageBalancer {
     this.onPartitionAdded = params.onPartitionAdded
   }
 
+  public size() {
+    return this.partitionGroupQueue.size()
+  }
+
   public async init() {
     const messageCountLimit = 10000
     let messageCount = 0
@@ -42,6 +46,8 @@ export default class MessageBalancer {
     let iteration
 
     console.log(await ((this.storage as any).db.readStats()))
+
+    const mIdSet = new Set<number>()
 
     for (iteration = 1; ; iteration++) {
       const messages = await this.storage.readPartitionMessagesOrderedById({
@@ -65,6 +71,8 @@ export default class MessageBalancer {
         }
 
         partitions.add(JSON.stringify({partitionGroup, partitionKey}))
+
+        mIdSet.add(messageId)
       }
 
       messageCount += messages.length
@@ -74,6 +82,7 @@ export default class MessageBalancer {
 
     this.isInitialized = true
     console.log(`MessageBalancer initialized with ${messageCount} messages after ${iteration} iterations`)
+    console.log(mIdSet.size)
   }
 
   public async storeMessage(messageData: MessageData) {
@@ -103,17 +112,14 @@ export default class MessageBalancer {
     return this.cache.getAndRemoveMessage(messageId) || (await this.storage.readMessage(messageId))!
   }
 
+  public removedCount = 0
+
   public async removeMessage(messageId: number) {
-    if (messageId % 1000 === 0) {
-      console.log(`removeMessage(${messageId})`)
-    }
+    // TODO: Looks like removeMessage method called more often than expected!
+    this.removedCount += 1
 
     this.assertInitialized()
     await this.storage.removeMessage(messageId)
-
-    if (messageId % 1000 === 0) {
-      console.log(`removeMessage(${messageId}) completed`)
-    }
   }
 
   private assertInitialized() {

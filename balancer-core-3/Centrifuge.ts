@@ -17,6 +17,9 @@ export default class Centrifuge<TValue> {
 
     partition.enqueue(value)
     this.valueCount += 1
+    if (this.valueCount && this.partitionQueue.isEmpty()) {
+      console.log('CRITICAL enqueue')
+    }
 
     return partition.size()
   }
@@ -36,6 +39,9 @@ export default class Centrifuge<TValue> {
     }
 
     this.valueCount -= 1
+    if (this.valueCount && this.partitionQueue.isEmpty()) {
+      console.log(`CRITICAL tryDequeue ${this.valueCount} ${partition.size()}`)
+    }
 
     return {
       value: partition.dequeue(),
@@ -77,6 +83,10 @@ class LinkedListQueue<TValue> {
   private head: LinkedListNode<TValue> | undefined = undefined
   private tail: LinkedListNode<TValue> | undefined = undefined
 
+  public isEmpty() {
+    return this.head === undefined
+  }
+
   public enqueue(value: TValue) {
     if (!this.head) {
       this.head = this.tail = {value, next: undefined}
@@ -88,6 +98,10 @@ class LinkedListQueue<TValue> {
   }
 
   public dequeue(): {value: TValue} {
+    if (!this.head || !this.tail) {
+      throw new Error('Queue is empty!')
+    }
+
     const value = this.head!.value
 
     if (this.head === this.tail) {

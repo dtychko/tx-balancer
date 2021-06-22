@@ -67,6 +67,8 @@ function emptyState() {
   }
 }
 
+export let scheduledProcessingCount = 0
+
 function connectedState(params: {ch: ConfirmChannel; qState: QState; messageBalancer: MessageBalancer}) {
   const {ch, qState, messageBalancer} = params
   const executor = new ExecutionSerializer()
@@ -77,6 +79,11 @@ function connectedState(params: {ch: ConfirmChannel; qState: QState; messageBala
         for (let i = 1; ; i++) {
           const messageRef = messageBalancer.tryDequeueMessage(partitionGroup => qState.canRegister(partitionGroup))
           if (!messageRef) {
+            if (messageBalancer.size() && !qState.size()) {
+              console.log('WARN')
+              // const messageRef2 = messageBalancer.tryDequeueMessage(partitionGroup => qState.canRegister(partitionGroup))
+            }
+
             break
           }
 
@@ -102,6 +109,8 @@ function connectedState(params: {ch: ConfirmChannel; qState: QState; messageBala
   }
 
   async function scheduleMessageProcessing(messageRef: MessageRef, queueMessageId: string, queueName: string) {
+    scheduledProcessingCount += 1
+
     try {
       const {messageId, partitionGroup, partitionKey} = messageRef
 

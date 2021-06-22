@@ -3,7 +3,7 @@ import {Db, Message, MessageCache, MessageStorage, migrateDb} from './balancer-c
 import MessageBalancer from './balancer-core-3/MessageBalancer'
 import {emptyBuffer} from './constants'
 import {publishAsync} from './publishAsync'
-import PublishLoop from './publishLoop'
+import PublishLoop, {scheduledProcessingCount} from './publishLoop'
 import {createQState} from './QState.create'
 import {assertResources} from './assertResources'
 import {Channel, Connection} from 'amqplib'
@@ -21,6 +21,14 @@ import {
 } from './config'
 import {handleMessage} from './handleMessage'
 import {Pool} from 'pg'
+
+process.on('uncaughtException', err => {
+  console.error('[CRITICAL] uncaughtException: ' + err)
+})
+
+process.on('unhandledRejection', res => {
+  console.error('[CRITICAL] unhandledRejection: ' + res)
+})
 
 async function main() {
   const consumeConn = await amqp.connect(amqpUri)
@@ -78,6 +86,13 @@ async function main() {
 
   await startFakePublisher(fakeConn)
   console.log('started fake publisher')
+
+  setInterval(async () => {
+    console.log(await db.readStats())
+    console.log({size: messageBalancer.size(), removedCount: messageBalancer.removedCount})
+    console.log({size: qState.size()})
+    console.log({scheduledProcessingCount})
+  }, 3000)
 }
 
 async function consumeInputQueue(ch: Channel, messageBalancer: MessageBalancer) {
@@ -113,7 +128,7 @@ async function startFakePublisher(conn: Connection) {
   const publishCh = await conn.createConfirmChannel()
   const content = Buffer.from(generateString(1 * 1024))
 
-  for (let _ = 0; _ < 100; _++) {
+  for (let _ = 0; _ < 11; _++) {
     for (let i = 0; i < 10; i++) {
       const promises = [] as Promise<void>[]
 
