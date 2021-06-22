@@ -1,10 +1,10 @@
 import {Message} from '@targetprocess/balancer-core'
 import {Pool} from 'pg'
 
-export type FullOrPartialMessage<TProp = unknown> =
+export type FullOrPartialMessage =
   | ({
       type: 'full'
-    } & Message<TProp>)
+    } & Message)
   | {
       type: 'partial'
       messageId: number
@@ -24,12 +24,16 @@ export class Db3 {
     toRow: number,
     totalContentSizeLimit: number
   ): Promise<FullOrPartialMessage[]> {
-    const [query, values] = totalContentSizeLimit ? fullQuery() : partialQuery()
+    const [query, values] = totalContentSizeLimit
+      ? fullQuery(fromRow, toRow, totalContentSizeLimit)
+      : partialQuery(fromRow, toRow)
     const result = await this.pool.query(query, values)
     return result.rows.map(buildFullOrPartialMessage)
+  }
+}
 
-    function partialQuery() {
-      return psql`
+function partialQuery(fromRow: number, toRow: number) {
+  return psql`
 SELECT message_id,
        partition_group,
        partition_key,
@@ -46,10 +50,10 @@ SELECT message_id,
    AND row_number <= ${toRow}
 ORDER BY message_id;
 `
-    }
+}
 
-    function fullQuery() {
-      return psql`
+function fullQuery(fromRow: number, toRow: number, totalContentSizeLimit: number) {
+  return psql`
 SELECT message_id,
        partition_group,
        partition_key,
@@ -75,30 +79,28 @@ SELECT message_id,
      ) AS t2
 ORDER BY message_id;
 `
+}
+
+function buildFullOrPartialMessage(row: any): FullOrPartialMessage {
+  const isPartial = row.is_partial!!
+
+  if (isPartial) {
+    return {
+      type: 'partial',
+      messageId: row.message_id,
+      partitionGroup: row.partition_group,
+      partitionKey: row.partition_key
     }
+  }
 
-    function buildFullOrPartialMessage(row: any): FullOrPartialMessage {
-      const isPartial = row.is_partial!!
-
-      if (isPartial) {
-        return {
-          type: 'partial',
-          messageId: row.message_id,
-          partitionGroup: row.partition_group,
-          partitionKey: row.partition_key
-        }
-      }
-
-      return {
-        type: 'full',
-        messageId: row.message_id,
-        partitionGroup: row.partition_group,
-        partitionKey: row.partition_key,
-        content: row.content,
-        properties: row.properties === null ? undefined : row.properties,
-        receivedDate: row.received_date
-      }
-    }
+  return {
+    type: 'full',
+    messageId: row.message_id,
+    partitionGroup: row.partition_group,
+    partitionKey: row.partition_key,
+    content: row.content,
+    properties: row.properties === null ? undefined : row.properties,
+    receivedDate: row.received_date
   }
 }
 

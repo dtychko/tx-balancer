@@ -1,8 +1,13 @@
-import {Message, MessageCache, MessageStorage} from '@targetprocess/balancer-core'
+import {MessageCache, MessageStorage} from '@targetprocess/balancer-core'
 import {MessageProperties} from 'amqplib'
 import MessageStorage3 from './MessageStorage3'
 import PartitionGroupQueue3 from './PartitionGroupQueue3'
 import {PartitionGroupGuard} from '../QState'
+
+interface Message extends MessageData {
+  messageId: number
+  receivedDate: Date
+}
 
 interface MessageData {
   partitionGroup: string
@@ -106,7 +111,8 @@ export default class MessageBalancer3 {
 
   public async getMessage(messageId: number): Promise<Message> {
     this.assertInitialized()
-    return this.cache.getAndRemoveMessage(messageId) || (await this.storage.readMessage(messageId))!
+    const message = this.cache.getAndRemoveMessage(messageId) || (await this.storage.readMessage(messageId))!
+    return message as Message
   }
 
   public async removeMessage(messageId: number) {
