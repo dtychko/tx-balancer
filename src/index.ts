@@ -1,8 +1,10 @@
+import {Db, MessageCache, MessageStorage, migrateDb} from '@targetprocess/balancer-core'
 import * as amqp from 'amqplib'
-import {Db, MessageCache, MessageStorage, migrateDb} from './balancer-core'
-import MessageBalancer from './balancer-core-3/MessageBalancer'
+import {Db3} from './balancing/Db3'
+import MessageBalancer3 from './balancing/MessageBalancer3'
+import MessageStorage3 from './balancing/MessageStorage3'
 import {emptyBuffer} from './constants'
-import {publishAsync} from './publishAsync'
+import {publishAsync} from './amqp/publishAsync'
 import PublishLoop from './publishLoop'
 import {createQState} from './QState.create'
 import {assertResources} from './assertResources'
@@ -19,7 +21,7 @@ import {
   postgresPoolMax,
   responseQueueName
 } from './config'
-import {handleMessage} from './handleMessage'
+import {handleMessage} from './amqp/handleMessage'
 import {Pool} from 'pg'
 
 process.on('uncaughtException', err => {
@@ -57,10 +59,13 @@ async function main() {
   console.log('migrated DB')
 
   const db = new Db({pool, useQueryCache: true})
+  const db3 = new Db3({pool})
   const storage = new MessageStorage({db, batchSize: 100})
+  const storage3 = new MessageStorage3({db3})
   const cache = new MessageCache({maxSize: 1024 ** 3})
-  const messageBalancer = new MessageBalancer({
+  const messageBalancer = new MessageBalancer3({
     storage,
+    storage3,
     cache,
     onPartitionAdded: _ => publishLoop.trigger()
   })
@@ -96,7 +101,7 @@ async function main() {
   }, 3000)
 }
 
-async function consumeInputQueue(ch: Channel, messageBalancer: MessageBalancer) {
+async function consumeInputQueue(ch: Channel, messageBalancer: MessageBalancer3) {
   await ch.consume(
     inputQueueName,
     handleMessage(async msg => {

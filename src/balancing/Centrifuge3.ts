@@ -1,6 +1,6 @@
 import {LinkedListQueue} from './LinkedListQueue'
 
-export default class Centrifuge<TValue> {
+export default class Centrifuge3<TValue> {
   private readonly partitions = new Map<string, Partition<TValue>>()
   private readonly partitionQueue = new LinkedListQueue<Partition<TValue>>()
   private valueCount = 0

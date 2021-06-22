@@ -1,9 +1,9 @@
-import Centrifuge from './Centrifuge'
+import Centrifuge3 from './Centrifuge3'
 import {PartitionGroupGuard} from '../QState'
 
-export default class PartitionGroupQueue {
-  private readonly partitionGroupCentrifuges = new Map<string, Centrifuge<number>>()
-  private readonly partitionGroupQueue = [] as {partitionGroup: string; centrifuge: Centrifuge<number>}[]
+export default class PartitionGroupQueue3 {
+  private readonly partitionGroupCentrifuges = new Map<string, Centrifuge3<number>>()
+  private readonly partitionGroupQueue = [] as {partitionGroup: string; centrifuge: Centrifuge3<number>}[]
 
   private messageCount = 0
 
@@ -15,7 +15,7 @@ export default class PartitionGroupQueue {
     let centrifuge = this.partitionGroupCentrifuges.get(partitionGroup)
 
     if (!centrifuge) {
-      centrifuge = new Centrifuge<number>()
+      centrifuge = new Centrifuge3<number>()
       this.partitionGroupCentrifuges.set(partitionGroup, centrifuge)
       this.partitionGroupQueue.push({partitionGroup, centrifuge})
     }

@@ -10,6 +10,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@targetprocess/balancer-core": "^0.7.0",
     "@types/amqplib": "^0.8.0",
     "@types/node": "^15.0.1",
     "@types/pg": "^8.6.0",

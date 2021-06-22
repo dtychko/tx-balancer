@@ -1,6 +1,7 @@
+import {Message, MessageCache, MessageStorage} from '@targetprocess/balancer-core'
 import {MessageProperties} from 'amqplib'
-import {Message, MessageCache, MessageStorage} from '../balancer-core'
-import PartitionGroupQueue from './PartitionGroupQueue'
+import MessageStorage3 from './MessageStorage3'
+import PartitionGroupQueue3 from './PartitionGroupQueue3'
 import {PartitionGroupGuard} from '../QState'
 
 interface MessageData {
@@ -16,20 +17,23 @@ export interface MessageRef {
   partitionKey: string
 }
 
-export default class MessageBalancer {
+export default class MessageBalancer3 {
   private readonly storage: MessageStorage
+  private readonly storage3: MessageStorage3
   private readonly cache: MessageCache
   private readonly onPartitionAdded: (partitionGroup: string, partitionKey: string) => void
 
-  private readonly partitionGroupQueue = new PartitionGroupQueue()
+  private readonly partitionGroupQueue = new PartitionGroupQueue3()
   private isInitialized = false
 
   constructor(params: {
     storage: MessageStorage
+    storage3: MessageStorage3
     cache: MessageCache
     onPartitionAdded: (partitionGroup: string, partitionKey: string) => void
   }) {
     this.storage = params.storage
+    this.storage3 = params.storage3
     this.cache = params.cache
     this.onPartitionAdded = params.onPartitionAdded
   }
@@ -47,7 +51,7 @@ export default class MessageBalancer {
 
     for (iteration = 1; ; iteration++) {
       const contentSizeLimit = initCache ? this.cache.maxSize - this.cache.size() : 0
-      const messages = await this.storage.readPartitionMessagesOrderedById({fromRow, toRow, contentSizeLimit})
+      const messages = await this.storage3.readPartitionMessagesOrderedById({fromRow, toRow, contentSizeLimit})
 
       if (!messages.length) {
         break

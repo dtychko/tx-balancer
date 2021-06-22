@@ -1,8 +1,8 @@
 import {Channel, ConfirmChannel} from 'amqplib'
 import {nanoid} from 'nanoid'
 import {emptyBuffer} from './constants'
-import {handleMessage} from './handleMessage'
-import {publishAsync} from './publishAsync'
+import {handleMessage} from './amqp/handleMessage'
+import {publishAsync} from './amqp/publishAsync'
 import {QState} from './QState'
 
 export async function consumeMirrorQueues(params: {

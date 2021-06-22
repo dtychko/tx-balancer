@@ -1,16 +1,16 @@
-import MessageBalancer, {MessageRef} from './balancer-core-3/MessageBalancer'
+import ExecutionSerializer from '@targetprocess/balancer-core/bin/MessageBalancer.Serializer'
+import MessageBalancer3, {MessageRef} from './balancing/MessageBalancer3'
 import {emptyBuffer} from './constants'
 import {QState} from './qState'
 import {ConfirmChannel, MessageProperties} from 'amqplib'
-import {publishAsync} from './publishAsync'
+import {publishAsync} from './amqp/publishAsync'
 import {mirrorQueueName, partitionGroupHeader, partitionKeyHeader} from './config'
-import ExecutionSerializer from './balancer-core/MessageBalancer.Serializer'
 
 export default class PublishLoop {
   private state = emptyState()
   private inProgress = false
 
-  public connectTo(params: {ch: ConfirmChannel; qState: QState; messageBalancer: MessageBalancer}) {
+  public connectTo(params: {ch: ConfirmChannel; qState: QState; messageBalancer: MessageBalancer3}) {
     this.state = connectedState(params)
   }
 
@@ -67,7 +67,7 @@ function emptyState() {
   }
 }
 
-function connectedState(params: {ch: ConfirmChannel; qState: QState; messageBalancer: MessageBalancer}) {
+function connectedState(params: {ch: ConfirmChannel; qState: QState; messageBalancer: MessageBalancer3}) {
   const {ch, qState, messageBalancer} = params
   const executor = new ExecutionSerializer()
 
