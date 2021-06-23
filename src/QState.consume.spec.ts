@@ -1,6 +1,5 @@
-import {Channel, ConfirmChannel, Message, MessageProperties, Options} from 'amqplib'
+import {Channel, ConfirmChannel, Message, Options} from 'amqplib'
 import {MessagePropertyHeaders} from 'amqplib/properties'
-import {nanoid} from 'nanoid'
 import {QState} from './QState'
 import {consumeMirrorQueues, consumeResponseQueue} from './QState.consume'
 
@@ -17,6 +16,7 @@ test('consumeResponseQueue', async () => {
       acks.push(msg)
     }
   } as Channel
+
   const qState = {
     registerResponseDeliveryTag: (messageId: string, deliveryTag: number) => {
       registrations.push({messageId, deliveryTag})
@@ -45,7 +45,7 @@ test('consumeMirrorQueues', async () => {
   const messageHandlers = new Map<string, (msg: Message) => void>()
   const acks = [] as Message[]
   const restores = [] as {messageId: string; partitionGroup: string; partitionKey: string; queueName: string}[]
-  const registrations = [] as {messageId: string; deliveryTag: number}[]
+  const deliveryTagRegistrations = [] as {messageId: string; deliveryTag: number}[]
 
   const ch = {
     publish: (exchange: string, queue: string, content: Buffer, options: Options.Publish, callback: () => void) => {
@@ -60,12 +60,13 @@ test('consumeMirrorQueues', async () => {
       acks.push(msg)
     }
   } as ConfirmChannel
+
   const qState = {
     restoreMessage(messageId: string, partitionGroup: string, partitionKey: string, queueName: string) {
       restores.push({messageId, partitionGroup, partitionKey, queueName})
     },
     registerMirrorDeliveryTag: (messageId: string, deliveryTag: number) => {
-      registrations.push({messageId, deliveryTag})
+      deliveryTagRegistrations.push({messageId, deliveryTag})
       return {registered: messageId !== 'decline'}
     }
   } as QState
@@ -76,29 +77,33 @@ test('consumeMirrorQueues', async () => {
     qState,
     outputQueueCount: 3,
     outputQueueName: i => `queue/${i}`,
-    mirrorQueueName: i => `mirror/${i}`,
+    mirrorQueueName: qName => `${qName}/mirror`,
     partitionGroupHeader: 'x-partition-group',
     partitionKeyHeader: 'x-partition-key'
   }).then(() => (initialized = true))
 
+  // Waiting for all consumers started and all marker messages published
   await waitFor(() => markerMessages.size === 3)
   await waitFor(() => messageHandlers.size === 3)
 
-  let deliveryTag = 1
-  for (const [queue, markerMessageId] of markerMessages) {
-    const handler = messageHandlers.get(queue)!
+  // Delivering a single message preceding the marker to each queue,
+  // then delivering all marker messages back
+  for (let i = 1; i <= 3; i++) {
+    const markerMessageId = markerMessages.get(`queue/${i}/mirror`)!
+    const handler = messageHandlers.get(`queue/${i}/mirror`)!
+
     handler({
-      fields: {deliveryTag: deliveryTag++},
+      fields: {deliveryTag: i},
       properties: {
-        messageId: nanoid(),
+        messageId: `message/${i}`,
         headers: {
-          ['x-partition-group']: `${queue}/group/1`,
+          ['x-partition-group']: `queue/${i}/group/1`,
           ['x-partition-key']: 'key/1'
         } as MessagePropertyHeaders
       }
     } as Message)
     handler({
-      fields: {deliveryTag: deliveryTag++},
+      fields: {deliveryTag: i * 10},
       properties: {messageId: markerMessageId}
     } as Message)
   }
@@ -107,14 +112,73 @@ test('consumeMirrorQueues', async () => {
 
   await consumePromise
 
+  // Make sure all marker messages were acked
+  expect(acks.length).toBe(3)
+  for (let i = 0; i < 3; i++) {
+    expect(acks[i].fields.deliveryTag).toBe((i + 1) * 10)
+  }
+  acks.splice(0)
+
+  // Make sure all messages preceding markers were restored in QState
   expect(restores.length).toBe(3)
-  for (const x of restores) {
-    expect(x.queueName).toBeTruthy()
-    expect(x.partitionGroup).toEqual(`${x.queueName}/group/1`)
-    expect(x.partitionKey).toEqual(`key/1`)
+  for (let i = 0; i < 3; i++) {
+    expect(restores[i].messageId).toBe(`message/${i + 1}`)
+    expect(restores[i].queueName).toBe(`queue/${i + 1}`)
+    expect(restores[i].partitionGroup).toEqual(`queue/${i + 1}/group/1`)
+    expect(restores[i].partitionKey).toEqual(`key/1`)
   }
 
-  expect(registrations.length).toBe(3)
+  // Make sure delivery tags for all messages preceding markers were registered in QState
+  expect(deliveryTagRegistrations.length).toBe(3)
+  for (let i = 0; i < 3; i++) {
+    expect(deliveryTagRegistrations[i].messageId).toBe(`message/${i + 1}`)
+    expect(deliveryTagRegistrations[i].deliveryTag).toBe(i + 1)
+  }
+  deliveryTagRegistrations.splice(0)
+
+  // Delivering a single valid message + a single invalid message
+  // to each queue after consumers initialization is completed
+  for (let i = 1; i <= 3; i++) {
+    const handler = messageHandlers.get(`queue/${i}/mirror`)!
+
+    handler({
+      fields: {deliveryTag: 10 + i},
+      properties: {
+        messageId: `message/${10 + i}`,
+        headers: {
+          ['x-partition-group']: `queue/${i}/group/1`,
+          ['x-partition-key']: 'key/1'
+        } as MessagePropertyHeaders
+      }
+    } as Message)
+    handler({
+      fields: {deliveryTag: 20 + i},
+      properties: {
+        messageId: 'decline',
+        headers: {
+          ['x-partition-group']: `queue/${i}/group/1`,
+          ['x-partition-key']: 'key/1'
+        } as MessagePropertyHeaders
+      }
+    } as Message)
+  }
+
+  // Waiting for all delivered messages are processed
+  await waitFor(() => deliveryTagRegistrations.length === 6)
+
+  // Make sure that delivery tags were registered for all delivered messages
+  for (let i = 0; i < 3; i++) {
+    expect(deliveryTagRegistrations[2 * i].messageId).toBe(`message/${10 + i + 1}`)
+    expect(deliveryTagRegistrations[2 * i].deliveryTag).toBe(10 + i + 1)
+    expect(deliveryTagRegistrations[2 * i + 1].messageId).toBe('decline')
+    expect(deliveryTagRegistrations[2 * i + 1].deliveryTag).toBe(20 + i + 1)
+  }
+
+  // Make sure that all invalid messages were acked immediately
+  expect(acks.length).toBe(3)
+  for (let i = 0; i < 3; i++) {
+    expect(acks[i].fields.deliveryTag).toBe(20 + i + 1)
+  }
 })
 
 async function waitFor(condition: () => boolean) {
