@@ -12,6 +12,7 @@ import {
 } from './config'
 import {QState} from './QState'
 import {consumeMirrorQueues, consumeResponseQueue} from './QState.consume'
+import {sumCharCodes} from './utils'
 
 export async function createQState(params: {ch: ConfirmChannel; onMessageProcessed: () => void}): Promise<QState> {
   const {ch, onMessageProcessed} = params
@@ -47,12 +48,4 @@ export async function createQState(params: {ch: ConfirmChannel; onMessageProcess
   await consumeResponseQueue(consumeParams)
 
   return qState
-}
-
-function sumCharCodes(str: string) {
-  let sum = 0
-  for (let i = 0; i < str.length; i++) {
-    sum += str.charCodeAt(i)
-  }
-  return sum
 }

@@ -73,6 +73,45 @@ export class QState {
     return this.messageSessionsByMessageId.size
   }
 
+  public stats() {
+    return {
+      queueCount: this.queueSessions.length,
+      partitionGroupCount: this.partitionGroupSessionsByPartitionGroup.size,
+      partitionKeyCount: [...this.partitionGroupSessionsByPartitionGroup.values()].reduce(
+        (acc, partitionGroupSession) => acc + partitionGroupSession.partitionKeySessions.size,
+        0
+      ),
+      messageCount: this.messageSessionsByMessageId.size
+    }
+  }
+
+  public diagnosticsState() {
+    const partitionGroupSessions = [...this.partitionGroupSessionsByPartitionGroup.values()]
+
+    return {
+      queues: this.queueSessions.map(queueSession => {
+        return {
+          queueName: queueSession.queueName,
+          partitionGroups: partitionGroupSessions
+            .filter(pgSession => pgSession.queueSession == queueSession)
+            .map(pgSession => {
+              return {
+                partitionGroup: pgSession.partitionGroup,
+                partitionKeys: [...pgSession.partitionKeySessions.values()].map(pkSession => {
+                  return {
+                    partitionKey: pkSession.partitionKey,
+                    messageCount: pkSession.messageCount
+                  }
+                }),
+                messageCount: pgSession.messageCount
+              }
+            }),
+          messageCount: queueSession.messageCount
+        }
+      })
+    }
+  }
+
   public canRegister(partitionGroup: string): PartitionGroupGuard {
     const capturedVersion = this.version
     const partitionGroupSession = this.partitionGroupSessionsByPartitionGroup.get(partitionGroup)
