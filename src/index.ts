@@ -23,6 +23,7 @@ import {
 import {handleMessage} from './amqp/handleMessage'
 import {Pool} from 'pg'
 import {Publisher} from './amqp/Publisher'
+import {startFakePublisher} from './fake.publisher'
 
 process.on('uncaughtException', err => {
   console.error('[CRITICAL] uncaughtException: ' + err)
@@ -86,8 +87,8 @@ async function main() {
   publishLoop.trigger()
   console.log('started PublishLoop')
 
-  await startFakeClients(fakeConn, outputQueueCount)
-  console.log('started fake clients')
+  // await startFakeClients(fakeConn, outputQueueCount)
+  // console.log('started fake clients')
 
   const publishedCount = await startFakePublisher(fakeConn)
   console.log(`started fake publisher ${publishedCount}`)
@@ -113,64 +114,6 @@ async function consumeInputQueue(ch: Channel, messageBalancer: MessageBalancer3)
     }),
     {noAck: false}
   )
-}
-
-async function startFakePublisher(conn: Connection) {
-  const publishCh = await conn.createConfirmChannel()
-  const publisher = new Publisher(publishCh)
-  const content = Buffer.from(generateString(100 * 1024))
-  let count = 0
-
-  for (let _ = 0; _ < 20; _++) {
-    for (let i = 0; i < 10; i++) {
-      const promises = [] as Promise<void>[]
-
-      for (let j = 0; j <= 100; j++) {
-        promises.push(
-          publisher.publishAsync('', inputQueueName, content, {
-            persistent: true,
-            headers: {
-              [partitionGroupHeader]: `account/${i}`,
-              [partitionKeyHeader]: j % 2 === 0 ? 'even' : 'odd'
-            }
-          })
-        )
-
-        count += 1
-      }
-
-      await Promise.all(promises)
-    }
-  }
-
-  return count
-}
-
-async function startFakeClients(conn: Connection, count: number) {
-  const clientCh = await conn.createConfirmChannel()
-  const publisher = new Publisher(clientCh)
-
-  for (let i = 0; i < count; i++) {
-    await clientCh.consume(
-      outputQueueName(i + 1),
-      handleMessage(msg => {
-        const messageId = msg.properties.messageId
-
-        clientCh.ack(msg)
-        publisher.publishAsync('', responseQueueName, emptyBuffer, {persistent: true, messageId})
-      }),
-      {noAck: false}
-    )
-  }
-}
-
-function generateString(length: number) {
-  let text = ''
-  const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
-  for (let i = 0; i < length; i++) {
-    text += possible.charAt(Math.floor(Math.random() * possible.length))
-  }
-  return text
 }
 
 main()
