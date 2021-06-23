@@ -15,17 +15,22 @@ export async function consumeMirrorQueues(params: {
   partitionKeyHeader: string
 }) {
   const {outputQueueCount, outputQueueName, mirrorQueueName} = params
+  const prommises = []
 
   for (let queueIndex = 1; queueIndex <= outputQueueCount; queueIndex++) {
     const outputQueue = outputQueueName(queueIndex)
     const mirrorQueue = mirrorQueueName(outputQueue)
 
-    await consumeMirrorQueue({
-      ...params,
-      mirrorQueue,
-      outputQueue
-    })
+    prommises.push(
+      consumeMirrorQueue({
+        ...params,
+        mirrorQueue,
+        outputQueue
+      })
+    )
   }
+
+  await Promise.all(prommises)
 }
 
 async function consumeMirrorQueue(params: {
