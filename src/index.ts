@@ -3,22 +3,19 @@ import * as amqp from 'amqplib'
 import {Db3} from './balancing/Db3'
 import MessageBalancer3 from './balancing/MessageBalancer3'
 import MessageStorage3 from './balancing/MessageStorage3'
-import {emptyBuffer} from './constants'
 import PublishLoop from './publishLoop'
 import {createQState} from './QState.create'
 import {assertResources} from './assertResources'
-import {Channel, Connection} from 'amqplib'
+import {Channel} from 'amqplib'
 import {
   amqpUri,
   inputChannelPrefetchCount,
   inputQueueName,
-  outputQueueCount,
-  outputQueueName,
+  mirrorQueueName,
   partitionGroupHeader,
   partitionKeyHeader,
   postgresConnectionString,
-  postgresPoolMax,
-  responseQueueName
+  postgresPoolMax
 } from './config'
 import {handleMessage} from './amqp/handleMessage'
 import {Pool} from 'pg'
@@ -68,23 +65,30 @@ async function main() {
     storage,
     storage3,
     cache,
-    onPartitionAdded: _ => publishLoop.trigger()
+    onPartitionAdded: _ => publishLoop.start()
   })
   console.log('created BalancedQueue')
 
   await messageBalancer.init({perRequestMessageCountLimit: 10000, initCache: true})
   console.log('initialized BalancedQueue')
 
-  const qState = await createQState({ch: qStateCh, onMessageProcessed: () => publishLoop.trigger()})
+  const qState = await createQState({ch: qStateCh, onMessageProcessed: () => publishLoop.start()})
   console.log('created QState')
 
   await consumeInputQueue(inputCh, messageBalancer)
   console.log('consumed input queue')
 
-  publishLoop.connectTo({publisher: new Publisher(loopCh), qState, messageBalancer})
+  publishLoop.connectTo({
+    publisher: new Publisher(loopCh),
+    qState,
+    messageBalancer,
+    mirrorQueueName,
+    partitionGroupHeader,
+    partitionKeyHeader
+  })
   console.log('connected PublishLoop')
 
-  publishLoop.trigger()
+  publishLoop.start()
   console.log('started PublishLoop')
 
   // await startFakeClients(fakeConn, outputQueueCount)

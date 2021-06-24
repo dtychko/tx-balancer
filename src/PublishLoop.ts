@@ -3,20 +3,30 @@ import MessageBalancer3, {MessageRef} from './balancing/MessageBalancer3'
 import {emptyBuffer} from './constants'
 import {QState} from './qState'
 import {MessageProperties} from 'amqplib'
-import {mirrorQueueName, partitionGroupHeader, partitionKeyHeader} from './config'
 import {Publisher} from './amqp/Publisher'
 
 export default class PublishLoop {
-  private state = emptyState()
+  private state = idleState()
   private inProgress = false
 
-  public connectTo(params: {publisher: Publisher; qState: QState; messageBalancer: MessageBalancer3}) {
+  public stats() {
+    return this.state.stats()
+  }
+
+  public connectTo(params: {
+    publisher: Publisher
+    qState: QState
+    messageBalancer: MessageBalancer3
+    mirrorQueueName: (queueName: string) => string
+    partitionGroupHeader: string
+    partitionKeyHeader: string
+  }) {
     this.state = connectedState(params)
   }
 
-  public trigger() {
+  public start(): {alreadyStarted: boolean} {
     if (this.inProgress) {
-      return
+      return {alreadyStarted: true}
     }
 
     this.inProgress = true
@@ -55,11 +65,16 @@ export default class PublishLoop {
       //
       this.inProgress = false
     })
+
+    return {alreadyStarted: false}
   }
 }
 
-function emptyState() {
+function idleState() {
   return {
+    stats: () => {
+      return {processingMessageCount: 0, processedMessageCount: 0}
+    },
     startLoop: (onCompleted: (err?: Error) => void) => {
       onCompleted()
       return Promise.resolve()
@@ -67,20 +82,32 @@ function emptyState() {
   }
 }
 
-function connectedState(params: {publisher: Publisher; qState: QState; messageBalancer: MessageBalancer3}) {
-  const {publisher, qState, messageBalancer} = params
+function connectedState(params: {
+  publisher: Publisher
+  qState: QState
+  messageBalancer: MessageBalancer3
+  mirrorQueueName: (queueName: string) => string
+  partitionGroupHeader: string
+  partitionKeyHeader: string
+}) {
+  const {publisher, qState, messageBalancer, mirrorQueueName, partitionGroupHeader, partitionKeyHeader} = params
   const executor = new ExecutionSerializer()
+  let processingMessageCount = 0
+  let processedMessageCount = 0
 
   return {
+    stats: () => {
+      return {processingMessageCount, processedMessageCount}
+    },
     startLoop: async (onCompleted: (err?: Error) => void) => {
       try {
         for (let i = 1; ; i++) {
           const messageRef = messageBalancer.tryDequeueMessage(partitionGroup => qState.canRegister(partitionGroup))
           if (!messageRef) {
-            if (messageBalancer.size() && !qState.size()) {
-              console.error(`[Critical] Unpublished messages left: ${messageBalancer.size()} messages`)
-              process.exit(1)
-            }
+            // if (messageBalancer.size() && !qState.size()) {
+            //   console.error(`[Critical] Unpublished messages left: ${messageBalancer.size()} messages`)
+            //   process.exit(1)
+            // }
 
             break
           }
@@ -88,9 +115,10 @@ function connectedState(params: {publisher: Publisher; qState: QState; messageBa
           const {partitionGroup, partitionKey} = messageRef
           const {queueMessageId, queueName} = qState.registerMessage(partitionGroup, partitionKey)
 
+          processingMessageCount += 1
           scheduleMessageProcessing(messageRef, queueMessageId, queueName)
 
-          if (i % 5 === 0) {
+          if (i % 1 === 0) {
             // Let's sometimes give a chance to either
             // messages for other partitionGroup to be enqueued to messageBalancer
             // or empty slots for other partitionGroup to be appeared in QState
@@ -136,6 +164,9 @@ function connectedState(params: {publisher: Publisher; qState: QState; messageBa
     } catch (err) {
       console.error(err)
       process.exit(1)
+    } finally {
+      processingMessageCount -= 1
+      processedMessageCount += 1
     }
   }
 }

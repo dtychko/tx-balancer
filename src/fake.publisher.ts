@@ -5,7 +5,7 @@ import {inputQueueName, partitionGroupHeader, partitionKeyHeader} from './config
 export async function startFakePublisher(conn: Connection) {
   const publishCh = await conn.createConfirmChannel()
   const publisher = new Publisher(publishCh)
-  const content = Buffer.from(generateString(10 * 1024))
+  const content = Buffer.from(generateString(1 * 1024))
   let count = 0
 
   for (let _ = 0; _ < 100; _++) {
