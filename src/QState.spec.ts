@@ -241,22 +241,22 @@ test('canRegister', () => {
   }
 
   expect(qState.canRegister('queue/1/group/1').canProcessPartitionGroup()).toBeFalsy()
-  expect(qState.canRegister('queue/1/group/1').canProcessPartitionKey('key/999')).toBeFalsy()
+  expect(qState.canRegister('queue/1/group/1').canProcessPartitionKey()).toBeFalsy()
   expect(qState.canRegister('queue/1/group/999').canProcessPartitionGroup()).toBeFalsy()
-  expect(qState.canRegister('queue/1/group/999').canProcessPartitionKey('key/999')).toBeFalsy()
+  expect(qState.canRegister('queue/1/group/999').canProcessPartitionKey()).toBeFalsy()
 
   expect(qState.canRegister('queue/2/group/2').canProcessPartitionGroup()).toBeFalsy()
-  expect(qState.canRegister('queue/2/group/2').canProcessPartitionKey('key/999')).toBeFalsy()
+  expect(qState.canRegister('queue/2/group/2').canProcessPartitionKey()).toBeFalsy()
 
   expect(qState.canRegister('queue/2/group/3').canProcessPartitionGroup()).toBeTruthy()
-  expect(qState.canRegister('queue/2/group/3').canProcessPartitionKey('key/1')).toBeFalsy()
-  expect(qState.canRegister('queue/2/group/3').canProcessPartitionKey('key/999')).toBeTruthy()
+  expect(qState.canRegister('queue/2/group/3').canProcessPartitionKey()).toBeFalsy()
+  expect(qState.canRegister('queue/2/group/3').canProcessPartitionKey()).toBeTruthy()
 
   expect(qState.canRegister('queue/2/group/999').canProcessPartitionGroup()).toBeTruthy()
-  expect(qState.canRegister('queue/2/group/999').canProcessPartitionKey('key/999')).toBeTruthy()
+  expect(qState.canRegister('queue/2/group/999').canProcessPartitionKey()).toBeTruthy()
 
   expect(qState.canRegister('queue/3/group/999').canProcessPartitionGroup()).toBeTruthy()
-  expect(qState.canRegister('queue/3/group/999').canProcessPartitionKey('key/999')).toBeTruthy()
+  expect(qState.canRegister('queue/3/group/999').canProcessPartitionKey()).toBeTruthy()
 })
 
 test('canRegister: incompatible guard version => error', () => {
@@ -269,10 +269,10 @@ test('canRegister: incompatible guard version => error', () => {
   qState.registerMessage('queue/3/group/3', 'key/3')
 
   expect(() => guard1.canProcessPartitionGroup()).toThrow()
-  expect(() => guard1.canProcessPartitionKey('key/1')).toThrow()
+  expect(() => guard1.canProcessPartitionKey()).toThrow()
 
   expect(() => guard2.canProcessPartitionGroup()).toThrow()
-  expect(() => guard2.canProcessPartitionKey('key/1')).toThrow()
+  expect(() => guard2.canProcessPartitionKey()).toThrow()
 })
 
 function createQState(params: {
