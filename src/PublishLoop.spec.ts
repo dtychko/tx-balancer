@@ -33,9 +33,9 @@ test('start: do not miss scheduled async call', async () => {
 })
 
 test('start: common scenarios', async () => {
-  const [publisher, publisherState] = createPublisherMock()
-  const [qState, qStateState] = createQStateMock()
-  const [messageBalancer, messageBalancerState] = createMessageBalancerStub([
+  const [publisher, publisherState] = mockPublisher()
+  const [qState, qStateState] = mockQState()
+  const [messageBalancer, messageBalancerState] = mockMessageBalancer([
     {
       messageId: 1,
       partitionGroup: 'group/1',
@@ -118,9 +118,9 @@ test('start: common scenarios', async () => {
 })
 
 test('start: serialize message publishing by partition group (actually, serialize all messages publishing at the moment)', async () => {
-  const [publisher, publisherState] = createPublisherMock()
-  const [qState, qStateState] = createQStateMock()
-  const [messageBalancer, messageBalancerState] = createMessageBalancerStub([
+  const [publisher, publisherState] = mockPublisher()
+  const [qState] = mockQState()
+  const [messageBalancer] = mockMessageBalancer([
     {
       messageId: 1,
       partitionGroup: 'group/1',
@@ -235,7 +235,7 @@ test('start: serialize message publishing by partition group (actually, serializ
   ])
 })
 
-function createPublisherMock() {
+function mockPublisher() {
   const publishAsyncCalls = [] as {exchange: string; queue: string; content: Buffer; options: Options.Publish}[]
   const publisher = {
     publishAsync: (exchange, queue, content, options) => {
@@ -247,7 +247,7 @@ function createPublisherMock() {
   return [publisher, {publishAsyncCalls}] as const
 }
 
-function createQStateMock() {
+function mockQState() {
   const registerMessageCalls = [] as {partitionGroup: string; partitionKey: string}[]
   let publishCounter = 1
   const qState = {
@@ -270,7 +270,7 @@ type ArrayElement<ArrayType extends readonly unknown[]> = ArrayType extends read
   ? ElementType
   : never
 
-function createMessageBalancerStub(
+function mockMessageBalancer(
   messages: {
     messageId: number
     partitionGroup: string

@@ -30,44 +30,38 @@ test('assert initialized', async () => {
 })
 
 test('init', async () => {
-  let messageIdCounter = 1
+  let messageId = 1
   const messages = [] as Message[]
 
   for (let group = 1; group <= 5; group++) {
     for (let key = 1; key <= 5; key++) {
       for (let i = 1; i <= group + key; i++) {
         const content = generateString(1024)
-        messages.push(createMessage(messageIdCounter++, `group/${group}`, `key/${key}`, content) as Message)
+        messages.push(createMessage(messageId++, `group/${group}`, `key/${key}`, content) as Message)
       }
     }
   }
 
-  const storage3 = createStorage3(messages)
-  const cache = new MessageCache({maxSize: 10 * 1024})
+  const [cache, cacheState] = mockCache(10 * 1024)
 
   const balancer = new MessageBalancer3({
     storage: {} as MessageStorage,
-    storage3,
+    storage3: mockStorage3(messages),
     cache,
     onPartitionAdded: () => {}
   })
 
-  await balancer.init({perRequestMessageCountLimit: 100, initCache: true})
+  await balancer.init({perRequestMessageCountLimit: 50, initCache: true})
 
   expect(balancer.size()).toBe(messages.length)
-  expect(cache.count()).toBe(10)
+  expect(cacheState.addMessageCalls.length).toBe(10)
   expect(cache.size()).toBe(10 * 1024)
 })
 
 test('storeMessage', async () => {
   const startedAt = new Date()
 
-  const addMessageCalls = [] as Message[]
-  const cache = {
-    addMessage(message) {
-      addMessageCalls.push(message)
-    }
-  } as MessageCache
+  const [cache, cacheState] = mockCache(Number.MAX_SAFE_INTEGER)
 
   let createMessageId = 0
   const storage = {
@@ -80,7 +74,7 @@ test('storeMessage', async () => {
   const onPartitionAddedCalls = [] as {partitionGroup: string; partitionKey: string}[]
   const balancer = new MessageBalancer3({
     storage,
-    storage3: createStorage3([]),
+    storage3: mockStorage3([]),
     cache,
     onPartitionAdded: (partitionGroup, partitionKey) => {
       onPartitionAddedCalls.push({partitionGroup, partitionKey})
@@ -116,7 +110,7 @@ test('storeMessage', async () => {
   ])
 
   expect(
-    addMessageCalls.map(call => {
+    cacheState.addMessageCalls.map(call => {
       const {receivedDate, ...rest} = call
       return rest
     })
@@ -128,7 +122,7 @@ test('storeMessage', async () => {
     createMessage(5, 'group/2', 'key/1')
   ])
 
-  expect(addMessageCalls.every(call => call.receivedDate > startedAt)).toBeTruthy()
+  expect(cacheState.addMessageCalls.every(call => call.receivedDate > startedAt)).toBeTruthy()
 
   expect(createMessageId).toBe(5)
 })
@@ -148,7 +142,7 @@ test('getMessage', async () => {
 
   const balancer = new MessageBalancer3({
     storage,
-    storage3: createStorage3([]),
+    storage3: mockStorage3([]),
     cache,
     onPartitionAdded: () => {}
   })
@@ -171,7 +165,7 @@ test('removeMessage', async () => {
 
   const balancer = new MessageBalancer3({
     storage,
-    storage3: createStorage3([]),
+    storage3: mockStorage3([]),
     cache: {} as MessageCache,
     onPartitionAdded: () => {}
   })
@@ -185,7 +179,7 @@ test('removeMessage', async () => {
   expect(removeMessageCalls).toEqual([{messageId: 10}, {messageId: 100}, {messageId: 1}])
 })
 
-function createStorage3(messages: Message[]) {
+function mockStorage3(messages: Message[]) {
   const partitions = new Map<string, Message[]>()
   for (const message of messages) {
     const {partitionGroup, partitionKey} = message
@@ -227,6 +221,27 @@ function createStorage3(messages: Message[]) {
       })
     }
   } as MessageStorage3
+}
+
+function mockCache(maxSize: number) {
+  const addMessageCalls = [] as Message[]
+  let size = 0
+  const cache = {
+    maxSize,
+    size() {
+      return size
+    },
+    addMessage(message: Message) {
+      addMessageCalls.push(message)
+      if (size + message.content.length <= maxSize) {
+        size += message.content.length
+        return true
+      }
+      return false
+    }
+  } as MessageCache
+
+  return [cache, {addMessageCalls}] as const
 }
 
 function createMessage(messageId: number, partitionGroup?: string, partitionKey?: string, content?: string) {
