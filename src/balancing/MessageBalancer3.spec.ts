@@ -31,39 +31,106 @@ test('assert initialized', async () => {
 
 test('init', async () => {
   let messageIdCounter = 1
+  const messages = [] as Message[]
 
-  const messages = [
-    createMessage(messageIdCounter++, 'group/1', 'key/1'),
-    createMessage(messageIdCounter++, 'group/1', 'key/2'),
-    createMessage(messageIdCounter++, 'group/1', 'key/2'),
-    createMessage(messageIdCounter++, 'group/2', 'key/1'),
-    createMessage(messageIdCounter++, 'group/2', 'key/1'),
-    createMessage(messageIdCounter++, 'group/2', 'key/1'),
-    createMessage(messageIdCounter++, 'group/3', 'key/1')
-  ] as Message[]
+  for (let group = 1; group <= 5; group++) {
+    for (let key = 1; key <= 5; key++) {
+      for (let i = 1; i <= group + key; i++) {
+        const content = generateString(1024)
+        messages.push(createMessage(messageIdCounter++, `group/${group}`, `key/${key}`, content) as Message)
+      }
+    }
+  }
+
   const storage3 = createStorage3(messages)
+  const cache = new MessageCache({maxSize: 10 * 1024})
 
   const balancer = new MessageBalancer3({
     storage: {} as MessageStorage,
     storage3,
-
-    // TODO: Replace with cacheMock
-    cache: new MessageCache(),
+    cache,
     onPartitionAdded: () => {}
   })
 
-  await balancer.init({perRequestMessageCountLimit: 10000, initCache: true})
+  await balancer.init({perRequestMessageCountLimit: 100, initCache: true})
 
   expect(balancer.size()).toBe(messages.length)
+  expect(cache.count()).toBe(10)
+  expect(cache.size()).toBe(10 * 1024)
 })
 
 test('storeMessage', async () => {
+  const startedAt = new Date()
+
+  const addMessageCalls = [] as Message[]
+  const cache = {
+    addMessage(message) {
+      addMessageCalls.push(message)
+    }
+  } as MessageCache
+
+  let createMessageId = 0
+  const storage = {
+    async createMessage(message) {
+      await sleep()
+      return {messageId: ++createMessageId, ...message}
+    }
+  } as MessageStorage
+
+  const onPartitionAddedCalls = [] as {partitionGroup: string; partitionKey: string}[]
   const balancer = new MessageBalancer3({
-    storage: {} as MessageStorage,
-    storage3: {} as MessageStorage3,
-    cache: {} as MessageCache,
-    onPartitionAdded: () => {}
+    storage,
+    storage3: createStorage3([]),
+    cache,
+    onPartitionAdded: (partitionGroup, partitionKey) => {
+      onPartitionAddedCalls.push({partitionGroup, partitionKey})
+    }
   })
+
+  await balancer.init({perRequestMessageCountLimit: 10000, initCache: false})
+
+  await balancer.storeMessage(createMessageData('group/1', 'key/1', 'message/1'))
+  expect(onPartitionAddedCalls).toEqual([{partitionGroup: 'group/1', partitionKey: 'key/1'}])
+
+  await balancer.storeMessage(createMessageData('group/1', 'key/1', 'message/2'))
+  expect(onPartitionAddedCalls).toEqual([{partitionGroup: 'group/1', partitionKey: 'key/1'}])
+
+  await balancer.storeMessage(createMessageData('group/2', 'key/1', 'message/3'))
+  expect(onPartitionAddedCalls).toEqual([
+    {partitionGroup: 'group/1', partitionKey: 'key/1'},
+    {partitionGroup: 'group/2', partitionKey: 'key/1'}
+  ])
+
+  await balancer.storeMessage(createMessageData('group/2', 'key/2', 'message/4'))
+  expect(onPartitionAddedCalls).toEqual([
+    {partitionGroup: 'group/1', partitionKey: 'key/1'},
+    {partitionGroup: 'group/2', partitionKey: 'key/1'},
+    {partitionGroup: 'group/2', partitionKey: 'key/2'}
+  ])
+
+  await balancer.storeMessage(createMessageData('group/2', 'key/1', 'message/5'))
+  expect(onPartitionAddedCalls).toEqual([
+    {partitionGroup: 'group/1', partitionKey: 'key/1'},
+    {partitionGroup: 'group/2', partitionKey: 'key/1'},
+    {partitionGroup: 'group/2', partitionKey: 'key/2'}
+  ])
+
+  expect(
+    addMessageCalls.map(call => {
+      const {receivedDate, ...rest} = call
+      return rest
+    })
+  ).toEqual([
+    createMessage(1, 'group/1', 'key/1'),
+    createMessage(2, 'group/1', 'key/1'),
+    createMessage(3, 'group/2', 'key/1'),
+    createMessage(4, 'group/2', 'key/2'),
+    createMessage(5, 'group/2', 'key/1')
+  ])
+
+  expect(addMessageCalls.every(call => call.receivedDate > startedAt)).toBeTruthy()
+
+  expect(createMessageId).toBe(5)
 })
 
 test('getMessage', async () => {
@@ -93,6 +160,31 @@ test('getMessage', async () => {
   await expect(balancer.getMessage(3)).rejects.toThrow('Unexpected messageId')
 })
 
+test('removeMessage', async () => {
+  const removeMessageCalls = [] as {messageId: number}[]
+  const storage = {
+    async removeMessage(messageId: number) {
+      removeMessageCalls.push({messageId})
+      await sleep()
+    }
+  } as MessageStorage
+
+  const balancer = new MessageBalancer3({
+    storage,
+    storage3: createStorage3([]),
+    cache: {} as MessageCache,
+    onPartitionAdded: () => {}
+  })
+
+  await balancer.init({perRequestMessageCountLimit: 10000, initCache: false})
+
+  await balancer.removeMessage(10)
+  await balancer.removeMessage(100)
+  await balancer.removeMessage(1)
+
+  expect(removeMessageCalls).toEqual([{messageId: 10}, {messageId: 100}, {messageId: 1}])
+})
+
 function createStorage3(messages: Message[]) {
   const partitions = new Map<string, Message[]>()
   for (const message of messages) {
@@ -112,26 +204,57 @@ function createStorage3(messages: Message[]) {
       for (const partition of partitions.values()) {
         const partitionSlice = [...partition]
           .sort((a, b) => a.messageId - b.messageId)
-          .slice(spec.fromRow - 1, spec.fromRow + spec.toRow - 1)
+          .slice(spec.fromRow - 1, spec.toRow)
         result.push(...partitionSlice)
       }
 
       result.sort((a, b) => a.messageId - b.messageId)
 
       await sleep()
-      return result.map(x => ({type: 'full', ...x}))
+
+      let contentSize = 0
+      return result.map((x): FullOrPartialMessage => {
+        if (contentSize + x.content.length <= spec.contentSizeLimit) {
+          contentSize += x.content.length
+          return {type: 'full', ...x}
+        }
+        return {
+          type: 'partial',
+          messageId: x.messageId,
+          partitionGroup: x.partitionGroup,
+          partitionKey: x.partitionKey
+        }
+      })
     }
   } as MessageStorage3
 }
 
-function createMessage(messageId: number, partitionGroup?: string, partitionKey?: string) {
+function createMessage(messageId: number, partitionGroup?: string, partitionKey?: string, content?: string) {
   return {
     messageId,
     partitionGroup: partitionGroup ?? `group/${messageId}`,
     partitionKey: partitionKey ?? `key/${messageId}`,
-    content: Buffer.from(`message/${messageId}`),
+    content: Buffer.from(content ?? `message/${messageId}`),
     properties: {}
   }
+}
+
+function createMessageData(partitionGroup: string, partitionKey: string, content: string) {
+  return {
+    partitionGroup,
+    partitionKey,
+    content: Buffer.from(content),
+    properties: {} as MessageProperties
+  }
+}
+
+function generateString(length: number) {
+  let text = ''
+  const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+  for (let i = 0; i < length; i++) {
+    text += possible.charAt(Math.floor(Math.random() * possible.length))
+  }
+  return text
 }
 
 async function sleep(ms: number = 0) {
