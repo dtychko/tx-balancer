@@ -1,0 +1,36 @@
+version: "3"
+
+services:
+  postgres:
+    image: postgres:12-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - 5434:5432
+
+  rabbit:
+    image: rabbitmq:management
+    ports:
+      - 5672:5672
+      - 15672:15672
+
+  balancer:
+    build:
+      context: ../
+    image: ${APP_IMAGE:-balancer-service-tests_balancer}
+    environment:
+      NODE_ENV: production
+      AMQP_URI: amqp://guest:guest@rabbit:5672/
+      POSTGRES_CONNECTION_STRING: postgres://postgres:postgres@postgres:5432/postgres
+    depends_on:
+      - postgres
+      - rabbit
+
+  service-tests:
+    build:
+      context: .
+    environment:
+      AMQP_URI: amqp://guest:guest@rabbit:5672/
+      POSTGRES_CONNECTION_STRING: postgres://postgres:postgres@postgres:5432/postgres
+    depends_on:
+      - balancer

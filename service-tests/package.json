@@ -1,0 +1,38 @@
+{
+  "name": "balancer-service-test",
+  "version": "0.1.0",
+  "description": "balancer service tests",
+  "scripts": {
+    "test": "jest --verbose --runInBand --bail",
+    "docker:test": "npm run _build && npm run docker:down && npm run docker:build && npm run docker:service-tests",
+    "docker:deps": "npm run _build && docker-compose -p balancer-service-tests up -d --build --force-recreate balancer",
+    "docker:down": "docker-compose -p balancer-service-tests down -v",
+    "docker:build": "docker-compose -p balancer-service-tests build",
+    "docker:service-tests": "docker-compose -p balancer-service-tests up --no-build --abort-on-container-exit service-tests",
+    "_build": "cd .. && npm run build"
+  },
+  "dependencies": {
+    "@types/amqplib": "^0.8.0",
+    "@types/jest": "^26.0.23",
+    "@types/node": "^15.12.4",
+    "amqplib": "^0.8.0",
+    "jest": "^27.0.5",
+    "ts-jest": "^27.0.3",
+    "typescript": "^4.3.2"
+  },
+  "jest": {
+    "rootDir": "src",
+    "transform": {
+      "^.+\\.tsx?$": "ts-jest"
+    },
+    "testRegex": "(\\.|/)(test|spec)\\.(jsx?|tsx?)$",
+    "moduleFileExtensions": [
+      "ts",
+      "tsx",
+      "js",
+      "jsx",
+      "json",
+      "node"
+    ]
+  }
+}

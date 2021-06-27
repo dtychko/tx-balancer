@@ -15,7 +15,7 @@
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
     "sourceMap": true,
-    "noEmit": true,
+    "outDir": "./bin",
     "resolveJsonModule": true,
     "lib": [
       "ESNext"
@@ -25,6 +25,10 @@
     "src",
   ],
   "exclude": [
-    "node_modules"
+    "node_modules",
+    "service-tests",
+    "**/__mocks__/**",
+    "**/__shared__/**",
+    "**/*.spec.ts"
   ]
 }

@@ -1,9 +1,8 @@
 import {Db, MessageCache, MessageStorage, migrateDb} from '@targetprocess/balancer-core'
-import * as amqp from 'amqplib'
 import {Db3} from './balancing/Db3'
 import MessageBalancer3 from './balancing/MessageBalancer3'
 import MessageStorage3 from './balancing/MessageStorage3'
-import PublishLoop from './publishLoop'
+import PublishLoop from './PublishLoop'
 import {createQState} from './QState.create'
 import {assertResources} from './assertResources'
 import {Channel} from 'amqplib'
@@ -21,6 +20,7 @@ import {handleMessage} from './amqp/handleMessage'
 import {Pool} from 'pg'
 import {Publisher} from './amqp/Publisher'
 import {startFakePublisher} from './fake.publisher'
+import {connect} from './amqp/connect'
 
 process.on('uncaughtException', err => {
   console.error('[CRITICAL] uncaughtException: ' + err)
@@ -31,9 +31,9 @@ process.on('unhandledRejection', res => {
 })
 
 async function main() {
-  const consumeConn = await amqp.connect(amqpUri)
-  const publishConn = await amqp.connect(amqpUri)
-  const fakeConn = await amqp.connect(amqpUri)
+  const consumeConn = await connect(amqpUri)
+  const publishConn = await connect(amqpUri)
+  const fakeConn = await connect(amqpUri)
   console.log('connected to RabbitMQ')
 
   const inputCh = await consumeConn.createChannel()
@@ -43,6 +43,7 @@ async function main() {
 
   await inputCh.prefetch(inputChannelPrefetchCount, false)
 
+  // Queues purge should be configurable
   await assertResources(qStateCh, true)
   console.log('asserted resources')
 
@@ -55,6 +56,9 @@ async function main() {
   })
   await migrateDb({pool})
   console.log('migrated DB')
+
+  // DB clean up should be configurable
+  await pool.query('delete from messages')
 
   const db = new Db({pool, useQueryCache: true})
   const db3 = new Db3({pool})
@@ -94,8 +98,8 @@ async function main() {
   // await startFakeClients(fakeConn, outputQueueCount)
   // console.log('started fake clients')
 
-  const publishedCount = await startFakePublisher(fakeConn)
-  console.log(`started fake publisher ${publishedCount}`)
+  // const publishedCount = await startFakePublisher(fakeConn)
+  // console.log(`started fake publisher ${publishedCount}`)
 
   setInterval(async () => {
     console.log({

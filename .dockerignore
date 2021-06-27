@@ -1,0 +1,12 @@
+.env
+.git
+.idea
+.vscode
+benchmark
+helm
+migration-tests
+scripts
+service-tests
+src
+logs
+tmp
