@@ -5,3 +5,15 @@ export function sumCharCodes(str: string) {
   }
   return sum
 }
+
+export async function waitFor(condition: () => boolean, ms: number = 100) {
+  while (!condition()) {
+    await sleep(ms)
+  }
+}
+
+async function sleep(ms: number = 0) {
+  return new Promise(res => {
+    setTimeout(res, ms)
+  })
+}

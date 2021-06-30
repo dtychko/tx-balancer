@@ -4,6 +4,7 @@ import {emptyBuffer} from './constants'
 import {QState} from './qState'
 import {MessageProperties} from 'amqplib'
 import {Publisher} from './amqp/Publisher'
+import {waitFor} from './utils'
 
 export default class PublishLoop {
   private state = idleState()
@@ -33,6 +34,7 @@ export default class PublishLoop {
     this.state.startLoop(err => {
       if (err) {
         console.error(err)
+        // TODO: call onError() callback instead of process.exit(1)
         process.exit(1)
       }
 
@@ -68,6 +70,10 @@ export default class PublishLoop {
 
     return {alreadyStarted: false}
   }
+
+  public async destroy() {
+    await this.state.destroy()
+  }
 }
 
 function idleState() {
@@ -77,6 +83,9 @@ function idleState() {
     },
     startLoop: (onCompleted: (err?: Error) => void) => {
       onCompleted()
+      return Promise.resolve()
+    },
+    destroy: () => {
       return Promise.resolve()
     }
   }
@@ -94,6 +103,7 @@ function connectedState(params: {
   const executor = new ExecutionSerializer()
   let processingMessageCount = 0
   let processedMessageCount = 0
+  let stopped = false
 
   return {
     stats: () => {
@@ -102,6 +112,11 @@ function connectedState(params: {
     startLoop: async (onCompleted: (err?: Error) => void) => {
       try {
         for (let i = 1; ; i++) {
+          if (stopped) {
+            onCompleted()
+            return
+          }
+
           const messageRef = messageBalancer.tryDequeueMessage(partitionGroup => qState.canRegister(partitionGroup))
           if (!messageRef) {
             // if (messageBalancer.size() && !qState.size()) {
@@ -131,6 +146,10 @@ function connectedState(params: {
       }
 
       onCompleted()
+    },
+    destroy: async () => {
+      stopped = true
+      await waitFor(() => !processingMessageCount)
     }
   }
 
@@ -143,6 +162,10 @@ function connectedState(params: {
       // TODO:  * Improve ExecutionSerializer to cleanup serialization key registry to prevent memory leaks
       const [, message] = await executor.serializeResolution('getMessage', messageBalancer.getMessage(messageId))
       const {content, properties} = message
+
+      if (stopped) {
+        return
+      }
 
       await Promise.all([
         publisher.publishAsync('', mirrorQueueName(queueName), emptyBuffer, {
@@ -163,6 +186,8 @@ function connectedState(params: {
       await messageBalancer.removeMessage(messageId)
     } catch (err) {
       console.error(err)
+      stopped = true
+      // TODO: call onError() callback instead of process.exit(1)
       process.exit(1)
     } finally {
       processingMessageCount -= 1
