@@ -2,6 +2,7 @@ import {Db, MessageCache, MessageStorage, migrateDb} from '@targetprocess/balanc
 import {Db3} from './balancing/Db3'
 import MessageBalancer3 from './balancing/MessageBalancer3'
 import MessageStorage3 from './balancing/MessageStorage3'
+import InputQueueConsumer from './InputQueueConsumer'
 import PublishLoop from './PublishLoop'
 import {createQState} from './QState.create'
 import {assertResources} from './assertResources'
@@ -79,7 +80,16 @@ async function main() {
   const qState = await createQState({ch: qStateCh, onMessageProcessed: () => publishLoop.start()})
   console.log('created QState')
 
-  await consumeInputQueue(inputCh, messageBalancer)
+  const inputQueueConsumer = new InputQueueConsumer({
+    ch: inputCh,
+    messageBalancer,
+    onError: () => {},
+    inputQueueName,
+    partitionGroupHeader,
+    partitionKeyHeader
+  })
+  await inputQueueConsumer.consume()
+  // await consumeInputQueue(inputCh, messageBalancer)
   console.log('consumed input queue')
 
   publishLoop.connectTo({
