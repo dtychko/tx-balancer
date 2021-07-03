@@ -6,33 +6,37 @@ import MessageBalancer3 from './balancing/MessageBalancer3'
 import PublishLoop from './PublishLoop'
 import {QState} from './QState'
 
-test('start: idle state', async () => {
+test('trigger: idle state', async () => {
   const loop = new PublishLoop()
 
-  expect(loop.start()).toEqual({alreadyStarted: false})
-  expect(loop.start()).toEqual({alreadyStarted: false})
+  expect(loop.trigger()).toEqual({alreadyStarted: false})
+  expect(loop.trigger()).toEqual({alreadyStarted: false})
 
   expect(loop.stats()).toEqual({
     processingMessageCount: 0,
-    processedMessageCount: 0
+    processedMessageCount: 0,
+    isLoopInProgress: false,
+    isDestroyed: false
   })
 })
 
-test('start: do not miss scheduled async call', async () => {
+test('trigger: do not miss scheduled async call', async () => {
   const loop = new PublishLoop()
 
-  const promise = Promise.resolve().then(() => loop.start())
+  const promise = Promise.resolve().then(() => loop.trigger())
 
-  expect(loop.start()).toEqual({alreadyStarted: false})
+  expect(loop.trigger()).toEqual({alreadyStarted: false})
   expect(await promise).toEqual({alreadyStarted: false})
 
   expect(loop.stats()).toEqual({
     processingMessageCount: 0,
-    processedMessageCount: 0
+    processedMessageCount: 0,
+    isLoopInProgress: false,
+    isDestroyed: false
   })
 })
 
-test('start: common scenarios', async () => {
+test('trigger: common scenarios', async () => {
   const [publisher, publisherState] = mockPublisher()
   const [qState, qStateState] = mockQState()
   const [messageBalancer, messageBalancerState] = mockMessageBalancer([
@@ -60,11 +64,12 @@ test('start: common scenarios', async () => {
     messageBalancer,
     mirrorQueueName: queue => `${queue}/mirror`,
     partitionGroupHeader: 'x-partition-group',
-    partitionKeyHeader: 'x-partition-key'
+    partitionKeyHeader: 'x-partition-key',
+    onError: () => {}
   })
 
-  expect(loop.start()).toEqual({alreadyStarted: false})
-  expect(loop.start()).toEqual({alreadyStarted: true})
+  expect(loop.trigger()).toEqual({alreadyStarted: false})
+  expect(loop.trigger()).toEqual({alreadyStarted: true})
 
   await waitFor(() => loop.stats().processedMessageCount == 2)
 
@@ -117,7 +122,7 @@ test('start: common scenarios', async () => {
   expect(messageBalancerState.removeMessageCalls).toEqual([{messageId: 1}, {messageId: 2}])
 })
 
-test('start: serialize message publishing by partition group (actually, serialize all messages publishing at the moment)', async () => {
+test('trigger: serialize message publishing by partition group (actually, serialize all messages publishing at the moment)', async () => {
   const [publisher, publisherState] = mockPublisher()
   const [qState] = mockQState()
   const [messageBalancer] = mockMessageBalancer([
@@ -161,10 +166,11 @@ test('start: serialize message publishing by partition group (actually, serializ
     messageBalancer,
     mirrorQueueName: queue => `${queue}/mirror`,
     partitionGroupHeader: 'x-partition-group',
-    partitionKeyHeader: 'x-partition-key'
+    partitionKeyHeader: 'x-partition-key',
+    onError: () => {}
   })
 
-  loop.start()
+  loop.trigger()
 
   await waitFor(() => awaiters.length === 3)
 

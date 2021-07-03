@@ -70,14 +70,14 @@ async function main() {
     storage,
     storage3,
     cache,
-    onPartitionAdded: _ => publishLoop.start()
+    onPartitionAdded: _ => publishLoop.trigger()
   })
   console.log('created BalancedQueue')
 
   await messageBalancer.init({perRequestMessageCountLimit: 10000, initCache: true})
   console.log('initialized BalancedQueue')
 
-  const qState = await createQState({ch: qStateCh, onMessageProcessed: () => publishLoop.start()})
+  const qState = await createQState({ch: qStateCh, onMessageProcessed: () => publishLoop.trigger()})
   console.log('created QState')
 
   const inputQueueConsumer = new InputQueueConsumer({
@@ -98,11 +98,12 @@ async function main() {
     messageBalancer,
     mirrorQueueName,
     partitionGroupHeader,
-    partitionKeyHeader
+    partitionKeyHeader,
+    onError: () => {}
   })
   console.log('connected PublishLoop')
 
-  publishLoop.start()
+  publishLoop.trigger()
   console.log('started PublishLoop')
 
   // await startFakeClients(fakeConn, outputQueueCount)

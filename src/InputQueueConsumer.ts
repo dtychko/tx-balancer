@@ -1,15 +1,16 @@
 import {Channel, Message} from 'amqplib'
 import MessageBalancer3 from './balancing/MessageBalancer3'
 import {inputQueueName, partitionGroupHeader, partitionKeyHeader} from './config'
+import {waitFor} from './utils'
 
 interface ConsumerContext {
   readonly ch: Channel
   readonly messageBalancer: MessageBalancer3
   readonly onError: (err: Error) => void
-  readonly setState: (state: ConsumerState) => Promise<void>
   readonly inputQueueName: string
   readonly partitionGroupHeader: string
   readonly partitionKeyHeader: string
+  readonly setState: (state: ConsumerState) => Promise<void>
   processingMessageCount: number
   isStopped: boolean
 }
@@ -38,15 +39,15 @@ export default class InputQueueConsumer {
       ch,
       messageBalancer,
       onError,
+      inputQueueName,
+      partitionGroupHeader,
+      partitionKeyHeader,
       setState: async state => {
         this.state = state
         if (this.state.waitForEnter) {
           await this.state.waitForEnter()
         }
       },
-      inputQueueName,
-      partitionGroupHeader,
-      partitionKeyHeader,
       processingMessageCount: 0,
       isStopped: false
     }
@@ -91,6 +92,26 @@ function startedState(ctx: ConsumerContext) {
   }
 }
 
+function canceledState(ctx: ConsumerContext, consumerTagPromise: Promise<string>) {
+  const canceled = (async () => {
+    ctx.isStopped = true
+    await ctx.ch.cancel(await consumerTagPromise)
+    await waitFor(() => !ctx.processingMessageCount)
+  })()
+
+  return {
+    async consume() {
+      throwUnsupportedSignal(this.consume.name, canceledState.name)
+    },
+    async cancel() {
+      throwUnsupportedSignal(this.cancel.name, canceledState.name)
+    },
+    async waitForEnter() {
+      await canceled
+    }
+  }
+}
+
 async function handleMessage(ctx: ConsumerContext, msg: Message | null) {
   if (ctx.isStopped) {
     return
@@ -115,25 +136,6 @@ async function handleMessage(ctx: ConsumerContext, msg: Message | null) {
     ctx.onError(err)
   } finally {
     ctx.processingMessageCount -= 1
-  }
-}
-
-function canceledState(ctx: ConsumerContext, consumerTagPromise: Promise<string>) {
-  const canceled = (async () => {
-    ctx.isStopped = true
-    await ctx.ch.cancel(await consumerTagPromise)
-  })()
-
-  return {
-    async consume() {
-      throwUnsupportedSignal(this.consume.name, canceledState.name)
-    },
-    async cancel() {
-      throwUnsupportedSignal(this.cancel.name, canceledState.name)
-    },
-    async waitForEnter() {
-      await canceled
-    }
   }
 }
 

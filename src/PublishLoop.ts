@@ -6,12 +6,40 @@ import {MessageProperties} from 'amqplib'
 import {Publisher} from './amqp/Publisher'
 import {waitFor} from './utils'
 
+interface PublishLoopContext {
+  readonly publisher: Publisher
+  readonly qState: QState
+  readonly messageBalancer: MessageBalancer3
+  readonly mirrorQueueName: (queueName: string) => string
+  readonly partitionGroupHeader: string
+  readonly partitionKeyHeader: string
+  readonly onError: (err: Error) => void
+  readonly setState: (state: PublishLoopState) => Promise<void>
+  processingMessageCount: number
+  processedMessageCount: number
+  isLoopInProgress: boolean
+  isDestroyed: boolean
+}
+
+interface PublishLoopState {
+  trigger: () => {alreadyStarted: boolean}
+  readonly destroy: () => Promise<void>
+  readonly waitForEnter?: () => Promise<void>
+}
+
 export default class PublishLoop {
-  private state = idleState()
-  private inProgress = false
+  private ctx: PublishLoopContext | undefined
+  private state: PublishLoopState = idleState()
 
   public stats() {
-    return this.state.stats()
+    const {
+      processingMessageCount = 0,
+      processedMessageCount = 0,
+      isLoopInProgress = false,
+      isDestroyed = false
+    } = this.ctx || {}
+
+    return {processingMessageCount, processedMessageCount, isLoopInProgress, isDestroyed}
   }
 
   public connectTo(params: {
@@ -21,54 +49,36 @@ export default class PublishLoop {
     mirrorQueueName: (queueName: string) => string
     partitionGroupHeader: string
     partitionKeyHeader: string
+    onError: (err: Error) => void
   }) {
-    this.state = connectedState(params)
-  }
+    const {publisher, qState, messageBalancer, mirrorQueueName, partitionGroupHeader, partitionKeyHeader, onError} =
+      params
 
-  public start(): {alreadyStarted: boolean} {
-    if (this.inProgress) {
-      return {alreadyStarted: true}
+    this.ctx = {
+      publisher,
+      qState,
+      messageBalancer,
+      mirrorQueueName,
+      partitionGroupHeader,
+      partitionKeyHeader,
+      onError,
+      setState: async state => {
+        this.state = state
+        if (this.state.waitForEnter) {
+          await this.state.waitForEnter()
+        }
+      },
+      processingMessageCount: 0,
+      processedMessageCount: 0,
+      isLoopInProgress: false,
+      isDestroyed: false
     }
 
-    this.inProgress = true
-    this.state.startLoop(err => {
-      if (err) {
-        console.error(err)
-        // TODO: call onError() callback instead of process.exit(1)
-        process.exit(1)
-      }
+    this.state = connectedState(this.ctx)
+  }
 
-      //
-      // "inProgress" flag should be reset synchronously as soon as the current loop completed.
-      // "await this.state.startLoop" continuation code won't run immediately,
-      // it will be scheduled to run asynchronously instead,
-      // as a result some calls to "startLoop" method could be missed, because "inProgress" flag won't be reset yet.
-      //
-      // Try to run the following code snippet to understand the issue:
-      //
-      //   async function main() {
-      //     await startLoop();
-      //     console.log("continuation started");
-      //   }
-      //
-      //   async function startLoop() {
-      //     await Promise.resolve();
-      //     Promise.resolve().then(() => console.log("another startLoop() call"));
-      //     console.log('startLoop() completed')
-      //   }
-      //
-      //   main();
-      //
-      // Expected console output:
-      //
-      //   > startLoop() completed
-      //   > another startLoop() call
-      //   > continuation started
-      //
-      this.inProgress = false
-    })
-
-    return {alreadyStarted: false}
+  public trigger(): {alreadyStarted: boolean} {
+    return this.state.trigger()
   }
 
   public async destroy() {
@@ -76,123 +86,143 @@ export default class PublishLoop {
   }
 }
 
-function idleState() {
+function idleState(): PublishLoopState {
   return {
-    stats: () => {
-      return {processingMessageCount: 0, processedMessageCount: 0}
+    trigger() {
+      return {alreadyStarted: false}
     },
-    startLoop: (onCompleted: (err?: Error) => void) => {
-      onCompleted()
-      return Promise.resolve()
-    },
-    destroy: () => {
-      return Promise.resolve()
+    async destroy() {
+      // TODO: Move to destroyed state instead of throwing
+      throwUnsupportedSignal(this.destroy.name, idleState.name)
     }
   }
 }
 
-function connectedState(params: {
-  publisher: Publisher
-  qState: QState
-  messageBalancer: MessageBalancer3
-  mirrorQueueName: (queueName: string) => string
-  partitionGroupHeader: string
-  partitionKeyHeader: string
-}) {
-  const {publisher, qState, messageBalancer, mirrorQueueName, partitionGroupHeader, partitionKeyHeader} = params
+function connectedState(ctx: PublishLoopContext): PublishLoopState {
   const executor = new ExecutionSerializer()
-  let processingMessageCount = 0
-  let processedMessageCount = 0
-  let stopped = false
 
   return {
-    stats: () => {
-      return {processingMessageCount, processedMessageCount}
-    },
-    startLoop: async (onCompleted: (err?: Error) => void) => {
-      try {
-        for (let i = 1; ; i++) {
-          if (stopped) {
-            onCompleted()
-            return
-          }
-
-          const messageRef = messageBalancer.tryDequeueMessage(partitionGroup => qState.canRegister(partitionGroup))
-          if (!messageRef) {
-            // if (messageBalancer.size() && !qState.size()) {
-            //   console.error(`[Critical] Unpublished messages left: ${messageBalancer.size()} messages`)
-            //   process.exit(1)
-            // }
-
-            break
-          }
-
-          const {partitionGroup, partitionKey} = messageRef
-          const {queueMessageId, queueName} = qState.registerMessage(partitionGroup, partitionKey)
-
-          processingMessageCount += 1
-          scheduleMessageProcessing(messageRef, queueMessageId, queueName)
-
-          if (i % 1 === 0) {
-            // Let's sometimes give a chance to either
-            // messages for other partitionGroup to be enqueued to messageBalancer
-            // or empty slots for other partitionGroup to be appeared in QState
-            await setImmediateAsync()
-          }
-        }
-      } catch (err) {
-        onCompleted(err)
-        return
+    trigger: () => {
+      if (ctx.isLoopInProgress) {
+        return {alreadyStarted: true}
       }
 
-      onCompleted()
+      ctx.isLoopInProgress = true
+      startLoop(ctx, executor)
+
+      return {alreadyStarted: false}
     },
     destroy: async () => {
-      stopped = true
-      await waitFor(() => !processingMessageCount)
+      await ctx.setState(destroyedState(ctx))
     }
   }
+}
 
-  async function scheduleMessageProcessing(messageRef: MessageRef, queueMessageId: string, queueName: string) {
-    try {
-      const {messageId, partitionGroup, partitionKey} = messageRef
+function destroyedState(ctx: PublishLoopContext): PublishLoopState {
+  const destroyed = (async () => {
+    ctx.isDestroyed = true
+    await waitFor(() => !ctx.processingMessageCount)
+  })()
 
-      // TODO: Serialize message resolution by partitionGroup
-      // TODO: Preconditions:
-      // TODO:  * Improve ExecutionSerializer to cleanup serialization key registry to prevent memory leaks
-      const [, message] = await executor.serializeResolution('getMessage', messageBalancer.getMessage(messageId))
-      const {content, properties} = message
+  return {
+    trigger() {
+      throwUnsupportedSignal(this.trigger.name, destroyedState.name)
+    },
+    async destroy() {
+      throwUnsupportedSignal(this.destroy.name, destroyedState.name)
+    },
+    async waitForEnter() {
+      await destroyed
+    }
+  }
+}
 
-      if (stopped) {
+async function startLoop(ctx: PublishLoopContext, executor: ExecutionSerializer) {
+  try {
+    for (let i = 1; ; i++) {
+      if (ctx.isDestroyed) {
+        // TODO: Log that the loop is stopped because of destroying
         return
       }
 
-      await Promise.all([
-        publisher.publishAsync('', mirrorQueueName(queueName), emptyBuffer, {
-          headers: {
-            [partitionGroupHeader]: partitionGroup,
-            [partitionKeyHeader]: partitionKey
-          },
-          persistent: true,
-          messageId: queueMessageId
-        }),
-        publisher.publishAsync('', queueName, content, {
-          ...(properties as MessageProperties),
-          persistent: true,
-          messageId: queueMessageId
-        })
-      ])
+      const messageRef = ctx.messageBalancer.tryDequeueMessage(partitionGroup => ctx.qState.canRegister(partitionGroup))
+      if (!messageRef) {
+        // if (messageBalancer.size() && !qState.size()) {
+        //   console.error(`[Critical] Unpublished messages left: ${messageBalancer.size()} messages`)
+        //   process.exit(1)
+        // }
 
-      await messageBalancer.removeMessage(messageId)
-    } catch (err) {
-      console.error(err)
-      stopped = true
-      // TODO: call onError() callback instead of process.exit(1)
-      process.exit(1)
-    } finally {
-      processingMessageCount -= 1
-      processedMessageCount += 1
+        break
+      }
+
+      const {partitionGroup, partitionKey} = messageRef
+      const {queueMessageId, queueName} = ctx.qState.registerMessage(partitionGroup, partitionKey)
+
+      ctx.processingMessageCount += 1
+      scheduleMessageProcessing(ctx, executor, messageRef, queueMessageId, queueName)
+
+      if (i % 1 === 0) {
+        // Let's sometimes give a chance to either
+        // messages for other partitionGroup to be enqueued to messageBalancer
+        // or empty slots for other partitionGroup to be appeared in QState
+        await setImmediateAsync()
+      }
     }
+  } catch (err) {
+    // TODO: Log error with a real logger
+    console.error(err)
+
+    ctx.onError(err)
+  } finally {
+    ctx.isLoopInProgress = false
+  }
+}
+
+async function scheduleMessageProcessing(
+  ctx: PublishLoopContext,
+  executor: ExecutionSerializer,
+  messageRef: MessageRef,
+  queueMessageId: string,
+  queueName: string
+) {
+  try {
+    const {messageId, partitionGroup, partitionKey} = messageRef
+
+    // TODO: Serialize message resolution by partitionGroup
+    // TODO: Preconditions:
+    // TODO:  * Improve ExecutionSerializer to cleanup serialization key registry to prevent memory leaks
+    const [, message] = await executor.serializeResolution('getMessage', ctx.messageBalancer.getMessage(messageId))
+    const {content, properties} = message
+
+    if (ctx.isDestroyed) {
+      return
+    }
+
+    await Promise.all([
+      ctx.publisher.publishAsync('', ctx.mirrorQueueName(queueName), emptyBuffer, {
+        headers: {
+          [ctx.partitionGroupHeader]: partitionGroup,
+          [ctx.partitionKeyHeader]: partitionKey
+        },
+        persistent: true,
+        messageId: queueMessageId
+      }),
+      ctx.publisher.publishAsync('', queueName, content, {
+        ...(properties as MessageProperties),
+        persistent: true,
+        messageId: queueMessageId
+      })
+    ])
+
+    await ctx.messageBalancer.removeMessage(messageId)
+  } catch (err) {
+    // TODO: Log error with a logger
+    console.error(err)
+
+    ctx.onError(err)
+  } finally {
+    ctx.processingMessageCount -= 1
+    ctx.processedMessageCount += 1
   }
 }
 
@@ -200,4 +230,8 @@ async function setImmediateAsync() {
   return new Promise(res => {
     setImmediate(res)
   })
+}
+
+function throwUnsupportedSignal(signal: string, state: string): never {
+  throw new Error(`Unsupported signal '${signal}' in state '${state}'`)
 }
