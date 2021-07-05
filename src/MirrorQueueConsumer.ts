@@ -1,6 +1,5 @@
 import {ConfirmChannel, Message} from 'amqplib'
 import {inputQueueName, partitionGroupHeader, partitionKeyHeader} from './config'
-import {waitFor} from './utils'
 import {QState} from './QState'
 import {nanoid} from 'nanoid'
 import {publishAsync} from './amqp/publishAsync'
@@ -9,16 +8,20 @@ import {emptyBuffer} from './constants'
 interface ConsumerContext {
   readonly ch: ConfirmChannel
   readonly qState: QState
-  readonly onError: (err: Error) => void
   readonly mirrorQueueName: string
   readonly outputQueueName: string
   readonly partitionGroupHeader: string
   readonly partitionKeyHeader: string
-  readonly markerMessageId: string
+
   readonly setState: (state: ConsumerState) => Promise<void>
-  processingMessageCount: number
-  isInitialized: boolean
-  isStopped: boolean
+  readonly onError: (err: Error) => void
+  readonly onInitialized: () => void
+  readonly onCanceled: () => void
+  readonly waitForInitialized: () => Promise<void>
+
+  readonly markerMessageId: string
+  readonly isInitialized: boolean
+  readonly isStopped: boolean
 }
 
 interface ConsumerState {
@@ -28,7 +31,6 @@ interface ConsumerState {
 }
 
 export default class MirrorQueueConsumer {
-  private readonly ctx: ConsumerContext
   private state: ConsumerState
 
   constructor(params: {
@@ -42,26 +44,51 @@ export default class MirrorQueueConsumer {
   }) {
     const {ch, qState, onError, mirrorQueueName, outputQueueName, partitionGroupHeader, partitionKeyHeader} = params
 
-    this.ctx = {
+    let initializedRes: () => void
+    let initializedRej: () => void
+    const initialized = new Promise<void>((res, rej) => {
+      initializedRes = res
+      initializedRej = rej
+    })
+
+    const ctx = {
       ch,
       qState,
-      onError,
       mirrorQueueName,
       outputQueueName,
       partitionGroupHeader,
       partitionKeyHeader,
-      markerMessageId: `__marker/${nanoid()}`,
-      setState: async state => {
+
+      setState: async (state: ConsumerState) => {
         this.state = state
         if (this.state.waitForEnter) {
           await this.state.waitForEnter()
         }
       },
-      processingMessageCount: 0,
+      onError: (err: Error) => {
+        ctx.isStopped = true
+        if (!ctx.isInitialized) {
+          initializedRej()
+        }
+        onError(err)
+      },
+      onInitialized: () => {
+        ctx.isInitialized = true
+        initializedRes()
+      },
+      onCanceled: () => {
+        ctx.isStopped = true
+      },
+      waitForInitialized: () => {
+        return initialized
+      },
+
+      markerMessageId: `__marker/${nanoid()}`,
       isInitialized: false,
       isStopped: false
     }
-    this.state = initialState(this.ctx)
+
+    this.state = initialState(ctx)
   }
 
   consume() {
@@ -76,7 +103,7 @@ export default class MirrorQueueConsumer {
 function initialState(ctx: ConsumerContext) {
   return {
     async consume() {
-      await ctx.setState(startedState(ctx))
+      await ctx.setState(initializedState(ctx))
     },
     async cancel() {
       throwUnsupportedSignal(this.cancel.name, initialState.name)
@@ -84,24 +111,14 @@ function initialState(ctx: ConsumerContext) {
   }
 }
 
-function startedState(ctx: ConsumerContext) {
-  let onInitialized: (err?: Error) => void
-  const initializedPromise = new Promise<void>((res, rej) => {
-    onInitialized = (err?: Error) => {
-      if (err) {
-        rej(err)
-      } else {
-        ctx.isInitialized = true
-        res()
-      }
-    }
-  })
+function initializedState(ctx: ConsumerContext) {
   const consumerTagPromise = (async () => {
-    return (await ctx.ch.consume(inputQueueName, msg => handleMessage(ctx, onInitialized, msg), {noAck: false}))
-      .consumerTag
+    // TODO: handle errors
+    return (await ctx.ch.consume(inputQueueName, msg => handleMessage(ctx, msg), {noAck: false})).consumerTag
   })()
+
   ;(async () => {
-    await consumerTagPromise
+    // TODO: handle errors
     await publishAsync(ctx.ch, '', ctx.mirrorQueueName, emptyBuffer, {
       persistent: true,
       messageId: ctx.markerMessageId
@@ -110,22 +127,21 @@ function startedState(ctx: ConsumerContext) {
 
   return {
     async consume() {
-      throwUnsupportedSignal(this.consume.name, startedState.name)
+      throwUnsupportedSignal(this.consume.name, initializedState.name)
     },
     async cancel() {
       await ctx.setState(canceledState(ctx, consumerTagPromise))
     },
     async waitForEnter() {
-      await initializedPromise
+      await ctx.waitForInitialized()
     }
   }
 }
 
 function canceledState(ctx: ConsumerContext, consumerTagPromise: Promise<string>) {
   const canceled = (async () => {
-    ctx.isStopped = true
+    ctx.onCanceled()
     await ctx.ch.cancel(await consumerTagPromise)
-    await waitFor(() => !ctx.processingMessageCount)
   })()
 
   return {
@@ -141,17 +157,16 @@ function canceledState(ctx: ConsumerContext, consumerTagPromise: Promise<string>
   }
 }
 
-async function handleMessage(ctx: ConsumerContext, onInitialized: (err?: Error) => void, msg: Message | null) {
+async function handleMessage(ctx: ConsumerContext, msg: Message | null) {
   if (ctx.isStopped) {
     return
   }
 
   if (!msg) {
-    ctx.isStopped = true
-    onInitialized(new Error('Input queue consumer was canceled by broker'))
     ctx.onError(new Error('Input queue consumer was canceled by broker'))
     return
   }
+
   const messageId = msg.properties.messageId
   const deliveryTag = msg.fields.deliveryTag
 
@@ -165,7 +180,7 @@ async function handleMessage(ctx: ConsumerContext, onInitialized: (err?: Error) 
 
   if (messageId === ctx.markerMessageId) {
     ctx.ch.ack(msg)
-    onInitialized()
+    ctx.onInitialized()
     return
   }
 
