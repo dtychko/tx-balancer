@@ -169,21 +169,26 @@ function initializingState(ctx: ConsumerContext, consumerTag: Promise<string>, o
         return
       }
 
-      const messageId = msg.properties.messageId
+      try {
+        const messageId = msg.properties.messageId
 
-      if (messageId === markerMessageId) {
-        ctx.ch.ack(msg)
-        ctx.setState(initializedState(ctx, consumerTag))
-        onInitialized()
-        return
+        if (messageId === markerMessageId) {
+          ctx.ch.ack(msg)
+          ctx.setState(initializedState(ctx, consumerTag))
+          onInitialized()
+          return
+        }
+
+        const deliveryTag = msg.fields.deliveryTag
+        const partitionGroup = msg.properties.headers[partitionGroupHeader]
+        const partitionKey = msg.properties.headers[partitionKeyHeader]
+
+        ctx.qState.restoreMessage(messageId, partitionGroup, partitionKey, ctx.outputQueueName)
+        ctx.qState.registerMirrorDeliveryTag(messageId, deliveryTag)
+      } catch (err) {
+        ctx.setState(errorState(ctx, consumerTag, err))
+        onInitialized(err)
       }
-
-      const deliveryTag = msg.fields.deliveryTag
-      const partitionGroup = msg.properties.headers[partitionGroupHeader]
-      const partitionKey = msg.properties.headers[partitionKeyHeader]
-
-      ctx.qState.restoreMessage(messageId, partitionGroup, partitionKey, ctx.outputQueueName)
-      ctx.qState.registerMirrorDeliveryTag(messageId, deliveryTag)
     }
   }
 
@@ -220,12 +225,16 @@ function initializedState(ctx: ConsumerContext, consumerTag: Promise<string>) {
         return
       }
 
-      const deliveryTag = msg.fields.deliveryTag
-      const messageId = msg.properties.messageId
-      const {registered} = ctx.qState.registerMirrorDeliveryTag(messageId, deliveryTag)
+      try {
+        const deliveryTag = msg.fields.deliveryTag
+        const messageId = msg.properties.messageId
+        const {registered} = ctx.qState.registerMirrorDeliveryTag(messageId, deliveryTag)
 
-      if (!registered) {
-        ctx.ch.ack(msg)
+        if (!registered) {
+          ctx.ch.ack(msg)
+        }
+      } catch (err) {
+        ctx.setState(errorState(ctx, consumerTag, err))
       }
     }
   }
