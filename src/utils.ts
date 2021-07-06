@@ -17,3 +17,9 @@ async function sleep(ms: number = 0) {
     setTimeout(res, ms)
   })
 }
+
+export async function setImmediateAsync() {
+  return new Promise(res => {
+    setImmediate(res)
+  })
+}

@@ -4,7 +4,7 @@ import {emptyBuffer} from './constants'
 import {QState} from './qState'
 import {MessageProperties} from 'amqplib'
 import {Publisher} from './amqp/Publisher'
-import {waitFor} from './utils'
+import {setImmediateAsync, waitFor} from './utils'
 
 interface PublishLoopContext {
   readonly publisher: Publisher
@@ -224,12 +224,6 @@ async function scheduleMessageProcessing(
     ctx.processingMessageCount -= 1
     ctx.processedMessageCount += 1
   }
-}
-
-async function setImmediateAsync() {
-  return new Promise(res => {
-    setImmediate(res)
-  })
 }
 
 function throwUnsupportedSignal(signal: string, state: string): never {
