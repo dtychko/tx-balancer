@@ -2,6 +2,7 @@ import {Channel, Message} from 'amqplib'
 import MessageBalancer3 from './balancing/MessageBalancer3'
 import {inputQueueName, partitionGroupHeader, partitionKeyHeader} from './config'
 import {setImmediateAsync, waitFor} from './utils'
+import {on} from 'cluster'
 
 interface ConsumerContext {
   readonly ch: Channel
@@ -13,20 +14,19 @@ interface ConsumerContext {
 
   readonly handleMessage: (msg: Message | null) => void
 
-  readonly setState: (state: ConsumerState) => Promise<void>
+  readonly setState: (state: ConsumerState) => void
   readonly compareAndExchangeState: (comparand: ConsumerState, state: () => ConsumerState) => boolean
 
   processingMessageCount: number
 }
 
 interface ConsumerState {
-  readonly consume: () => Promise<void>
-  readonly cancel: () => Promise<void>
+  readonly init: () => Promise<void>
+  readonly destroy: () => Promise<void>
   readonly handleMessage: (msg: Message | null) => Promise<void>
 }
 
 export default class InputQueueConsumer {
-  private readonly ctx: ConsumerContext
   private state: ConsumerState
 
   constructor(params: {
@@ -39,7 +39,7 @@ export default class InputQueueConsumer {
   }) {
     const {ch, messageBalancer, onError, inputQueueName, partitionGroupHeader, partitionKeyHeader} = params
 
-    this.ctx = {
+    this.state = initialState({
       ch,
       messageBalancer,
       onError,
@@ -61,31 +61,30 @@ export default class InputQueueConsumer {
         this.state = getState()
         return true
       },
-      processingMessageCount: 0,
-    }
 
-    this.state = initialState(this.ctx)
+      processingMessageCount: 0
+    })
   }
 
-  consume() {
-    return this.state.consume()
+  init() {
+    return this.state.init()
   }
 
-  async cancel() {
-    return this.state.cancel()
+  destroy() {
+    return this.state.destroy()
   }
 }
 
-function initialState(ctx: ConsumerContext) {
+function initialState(ctx: ConsumerContext): ConsumerState {
   return {
-    async consume() {
+    async init() {
       await promise(onInitialized => {
         ctx.setState(startedState(ctx, onInitialized))
       })
     },
-    async cancel() {
+    async destroy() {
       await promise(onDestroyed => {
-        ctx.setState(canceledState(ctx, Promise.resolve(''), onDestroyed))
+        ctx.setState(destroyedState(ctx, Promise.resolve(''), onDestroyed))
       })
     },
     async handleMessage() {
@@ -94,25 +93,24 @@ function initialState(ctx: ConsumerContext) {
   }
 }
 
-function startedState(ctx: ConsumerContext, onInitialized: (err?: Error) => void) {
+function startedState(ctx: ConsumerContext, onInitialized: (err?: Error) => void): ConsumerState {
   const consumerTag = (async () => {
     return (await ctx.ch.consume(inputQueueName, msg => ctx.handleMessage(msg), {noAck: false})).consumerTag
   })()
 
   const state = {
-    async consume() {
-      throwUnsupportedSignal(this.consume.name, startedState.name)
+    async init() {
+      throwUnsupportedSignal(this.init.name, startedState.name)
     },
-    async cancel() {
+    async destroy() {
       await promise(onDestroyed => {
-        ctx.setState(canceledState(ctx, Promise.resolve(''), onDestroyed))
-        onInitialized(new Error("Consumer was destroyed"))
+        ctx.setState(destroyedState(ctx, Promise.resolve(''), onDestroyed))
+        onInitialized(new Error('Consumer was destroyed'))
       })
     },
     async handleMessage(msg: Message | null) {
       if (!msg) {
-        const err = new Error('Consumer was canceled by broker')
-        ctx.setState(errorState(ctx, consumerTag, err))
+        ctx.setState(errorState(ctx, consumerTag, new Error('Consumer was canceled by broker')))
         return
       }
 
@@ -132,43 +130,66 @@ function startedState(ctx: ConsumerContext, onInitialized: (err?: Error) => void
     }
   }
 
+  ;(async () => {
+    try {
+      await consumerTag
+      onInitialized()
+    } catch (err) {
+      if (ctx.compareAndExchangeState(state, () => errorState(ctx, consumerTag, err))) {
+        onInitialized(err)
+      }
+    }
+  })()
+
   return state
 }
 
-function errorState(ctx: ConsumerContext, consumerTag: Promise<string>, err: Error) {
+function errorState(ctx: ConsumerContext, consumerTag: Promise<string>, err: Error): ConsumerState {
   ;(async () => {
     await setImmediateAsync()
     ctx.onError(err)
   })()
 
   return {
-    async consume() {
-      throwUnsupportedSignal(this.consume.name, errorState.name)
+    async init() {
+      throwUnsupportedSignal(this.init.name, errorState.name)
     },
-    async cancel() {
+    async destroy() {
       await promise(onDestroyed => {
-        ctx.setState(canceledState(ctx, consumerTag, onDestroyed))
+        ctx.setState(destroyedState(ctx, consumerTag, onDestroyed))
       })
     },
     async handleMessage() {}
   }
 }
 
-function canceledState(ctx: ConsumerContext, consumerTagPromise: Promise<string>, onDestroyed: (err?: Error) => void) {
-  const canceled = (async () => {
-    await ctx.ch.cancel(await consumerTagPromise)
-    await waitFor(() => !ctx.processingMessageCount)
+function destroyedState(
+  ctx: ConsumerContext,
+  consumerTag: Promise<string>,
+  onDestroyed: (err?: Error) => void
+): ConsumerState {
+  ;(async () => {
+    try {
+      const cTag = await consumerTag
+      if (cTag) {
+        await ctx.ch.cancel(cTag)
+      }
+
+      await waitFor(() => !ctx.processingMessageCount)
+      onDestroyed()
+    } catch (err) {
+      onDestroyed(err)
+    }
   })()
 
   return {
-    async consume() {
-      throwUnsupportedSignal(this.consume.name, canceledState.name)
+    async init() {
+      throwUnsupportedSignal(this.init.name, destroyedState.name)
     },
-    async cancel() {
-      throwUnsupportedSignal(this.cancel.name, canceledState.name)
+    async destroy() {
+      throwUnsupportedSignal(this.destroy.name, destroyedState.name)
     },
-    async handleMessage() {
-    }
+    async handleMessage() {}
   }
 }
 
