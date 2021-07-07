@@ -88,7 +88,7 @@ async function main() {
     partitionGroupHeader,
     partitionKeyHeader
   })
-  await inputQueueConsumer.consume()
+  await inputQueueConsumer.init()
   // await consumeInputQueue(inputCh, messageBalancer)
   console.log('consumed input queue')
 

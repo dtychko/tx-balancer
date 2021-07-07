@@ -1,8 +1,6 @@
 import {Channel, Message} from 'amqplib'
 import MessageBalancer3 from './balancing/MessageBalancer3'
-import {inputQueueName, partitionGroupHeader, partitionKeyHeader} from './config'
-import {setImmediateAsync, waitFor} from './utils'
-import {on} from 'cluster'
+import {waitFor} from './utils'
 
 interface ConsumerContext {
   readonly ch: Channel
@@ -12,18 +10,16 @@ interface ConsumerContext {
   readonly partitionGroupHeader: string
   readonly partitionKeyHeader: string
 
+  readonly compareExchangeState: (toState: ConsumerState, fromState: ConsumerState) => boolean
   readonly handleMessage: (msg: Message | null) => void
-
-  readonly setState: (state: ConsumerState) => void
-  readonly compareAndExchangeState: (comparand: ConsumerState, state: () => ConsumerState) => boolean
-
-  processingMessageCount: number
 }
 
 interface ConsumerState {
+  readonly onEnter: () => void
+
   readonly init: () => Promise<void>
   readonly destroy: () => Promise<void>
-  readonly handleMessage: (msg: Message | null) => Promise<void>
+  readonly handleMessage: (msg: Message | null) => void
 }
 
 export default class InputQueueConsumer {
@@ -39,7 +35,7 @@ export default class InputQueueConsumer {
   }) {
     const {ch, messageBalancer, onError, inputQueueName, partitionGroupHeader, partitionKeyHeader} = params
 
-    this.state = initialState({
+    const ctx = {
       ch,
       messageBalancer,
       onError,
@@ -47,23 +43,22 @@ export default class InputQueueConsumer {
       partitionGroupHeader,
       partitionKeyHeader,
 
+      compareExchangeState: (toState, fromState) => {
+        if (this.state === fromState) {
+          this.state = toState
+          this.state.onEnter()
+          return true
+        }
+
+        return false
+      },
       handleMessage: msg => {
         this.state.handleMessage(msg)
-      },
+      }
+    } as ConsumerContext
 
-      setState: async state => {
-        this.state = state
-      },
-      compareAndExchangeState: (comparand, getState) => {
-        if (this.state !== comparand) {
-          return false
-        }
-        this.state = getState()
-        return true
-      },
-
-      processingMessageCount: 0
-    })
+    this.state = new InitialState(ctx)
+    this.state.onEnter()
   }
 
   init() {
@@ -75,121 +70,181 @@ export default class InputQueueConsumer {
   }
 }
 
-function initialState(ctx: ConsumerContext): ConsumerState {
-  return {
-    async init() {
-      await promise(onInitialized => {
-        ctx.setState(startedState(ctx, onInitialized))
-      })
-    },
-    async destroy() {
-      await promise(onDestroyed => {
-        ctx.setState(destroyedState(ctx, Promise.resolve(''), onDestroyed))
-      })
-    },
-    async handleMessage() {
-      throwUnsupportedSignal(this.handleMessage.name, initialState.name)
-    }
+class InitialState implements ConsumerState {
+  constructor(private readonly ctx: ConsumerContext) {}
+
+  public onEnter() {}
+
+  public async init() {
+    await deferred(onInitialized => {
+      this.ctx.compareExchangeState(new InitializedState(this.ctx, {onInitialized}), this)
+    })
+  }
+
+  public async destroy() {
+    await deferred(onDestroyed => {
+      this.ctx.compareExchangeState(
+        new DestroyedState(this.ctx, {
+          consumerTag: undefined,
+          statistics: {processingMessageCount: 0},
+          onDestroyed
+        }),
+        this
+      )
+    })
+  }
+
+  public handleMessage() {
+    throwUnsupportedSignal(this.handleMessage.name, InitialState.name)
   }
 }
 
-function startedState(ctx: ConsumerContext, onInitialized: (err?: Error) => void): ConsumerState {
-  const consumerTag = (async () => {
-    return (await ctx.ch.consume(inputQueueName, msg => ctx.handleMessage(msg), {noAck: false})).consumerTag
-  })()
+class InitializedState implements ConsumerState {
+  private statistics: {processingMessageCount: number} = {processingMessageCount: 0}
+  private consumerTag?: Promise<string>
 
-  const state = {
-    async init() {
-      throwUnsupportedSignal(this.init.name, startedState.name)
-    },
-    async destroy() {
-      await promise(onDestroyed => {
-        ctx.setState(destroyedState(ctx, Promise.resolve(''), onDestroyed))
-        onInitialized(new Error('Consumer was destroyed'))
-      })
-    },
-    async handleMessage(msg: Message | null) {
-      if (!msg) {
-        ctx.setState(errorState(ctx, consumerTag, new Error('Consumer was canceled by broker')))
-        return
-      }
+  constructor(private readonly ctx: ConsumerContext, private readonly args: {onInitialized: (err?: Error) => void}) {}
 
-      ctx.processingMessageCount += 1
+  public async onEnter() {
+    // TODO: move to ErrorState when channel is closed
+    // this.ctx.ch.once('close', () => {})
+    // this.ctx.ch.once('error', () => {})
 
-      try {
-        const {content, properties} = msg
-        const partitionGroup = msg.properties.headers[partitionGroupHeader]
-        const partitionKey = msg.properties.headers[partitionKeyHeader]
-        await ctx.messageBalancer.storeMessage({partitionGroup, partitionKey, content, properties})
-        ctx.ch.ack(msg)
-      } catch (err) {
-        ctx.compareAndExchangeState(state, () => errorState(ctx, consumerTag, err))
-      } finally {
-        ctx.processingMessageCount -= 1
-      }
-    }
-  }
+    this.consumerTag = (async () => {
+      return (await this.ctx.ch.consume(this.ctx.inputQueueName, msg => this.ctx.handleMessage(msg), {noAck: false}))
+        .consumerTag
+    })()
 
-  ;(async () => {
     try {
-      await consumerTag
-      onInitialized()
+      await this.consumerTag
+      this.args.onInitialized()
     } catch (err) {
-      if (ctx.compareAndExchangeState(state, () => errorState(ctx, consumerTag, err))) {
-        onInitialized(err)
-      }
+      this.ctx.compareExchangeState(
+        new ErrorState(this.ctx, {consumerTag: this.consumerTag, statistics: this.statistics, err}),
+        this
+      )
+      this.args.onInitialized(err)
     }
-  })()
+  }
 
-  return state
-}
+  public async init() {
+    throwUnsupportedSignal(this.init.name, InitializedState.name)
+  }
 
-function errorState(ctx: ConsumerContext, consumerTag: Promise<string>, err: Error): ConsumerState {
-  ;(async () => {
-    await setImmediateAsync()
-    ctx.onError(err)
-  })()
+  public async destroy() {
+    await deferred(onDestroyed => {
+      this.ctx.compareExchangeState(
+        new DestroyedState(this.ctx, {consumerTag: this.consumerTag, statistics: this.statistics, onDestroyed}),
+        this
+      )
+    })
+  }
 
-  return {
-    async init() {
-      throwUnsupportedSignal(this.init.name, errorState.name)
-    },
-    async destroy() {
-      await promise(onDestroyed => {
-        ctx.setState(destroyedState(ctx, consumerTag, onDestroyed))
-      })
-    },
-    async handleMessage() {}
+  public async handleMessage(msg: Message | null) {
+    if (!msg) {
+      this.ctx.compareExchangeState(
+        new ErrorState(this.ctx, {
+          consumerTag: this.consumerTag,
+          statistics: this.statistics,
+          err: new Error('Consumer was canceled by broker')
+        }),
+        this
+      )
+      return
+    }
+
+    this.statistics.processingMessageCount += 1
+
+    try {
+      const {content, properties} = msg
+      const partitionGroup = msg.properties.headers[this.ctx.partitionGroupHeader]
+      const partitionKey = msg.properties.headers[this.ctx.partitionKeyHeader]
+      await this.ctx.messageBalancer.storeMessage({partitionGroup, partitionKey, content, properties})
+      this.ctx.ch.ack(msg)
+    } catch (err) {
+      this.ctx.compareExchangeState(
+        new ErrorState(this.ctx, {consumerTag: this.consumerTag!, statistics: this.statistics, err}),
+        this
+      )
+    } finally {
+      this.statistics.processingMessageCount -= 1
+    }
   }
 }
 
-function destroyedState(
-  ctx: ConsumerContext,
-  consumerTag: Promise<string>,
-  onDestroyed: (err?: Error) => void
-): ConsumerState {
-  ;(async () => {
+class ErrorState implements ConsumerState {
+  constructor(
+    private readonly ctx: ConsumerContext,
+    private readonly args: {
+      consumerTag: Promise<string> | undefined
+      statistics: {processingMessageCount: number}
+      err: Error
+    }
+  ) {}
+
+  public onEnter() {
+    this.ctx.onError(this.args.err)
+  }
+
+  public async init() {
+    throwUnsupportedSignal(this.init.name, ErrorState.name)
+  }
+
+  public async destroy() {
+    await deferred(onDestroyed => {
+      this.ctx.compareExchangeState(
+        new DestroyedState(this.ctx, {
+          consumerTag: this.args.consumerTag,
+          statistics: this.args.statistics,
+          onDestroyed
+        }),
+        this
+      )
+    })
+  }
+
+  public handleMessage() {
+    // Ignore all messages after the error occurred
+  }
+}
+
+class DestroyedState implements ConsumerState {
+  constructor(
+    private readonly ctx: ConsumerContext,
+    private readonly args: {
+      consumerTag: Promise<string> | undefined
+      statistics: {processingMessageCount: number}
+      onDestroyed: (err?: Error) => void
+    }
+  ) {}
+
+  public async onEnter() {
     try {
-      const cTag = await consumerTag
-      if (cTag) {
-        await ctx.ch.cancel(cTag)
+      // Wait for all active message processing operations are completed
+      // TODO: Think about timeout for waitFor operation
+      await waitFor(() => !this.args.statistics.processingMessageCount)
+
+      const cTag = await this.args.consumerTag
+      if (cTag !== undefined) {
+        await this.ctx.ch.cancel(cTag)
       }
 
-      await waitFor(() => !ctx.processingMessageCount)
-      onDestroyed()
+      this.args.onDestroyed()
     } catch (err) {
-      onDestroyed(err)
+      this.args.onDestroyed(err)
     }
-  })()
+  }
 
-  return {
-    async init() {
-      throwUnsupportedSignal(this.init.name, destroyedState.name)
-    },
-    async destroy() {
-      throwUnsupportedSignal(this.destroy.name, destroyedState.name)
-    },
-    async handleMessage() {}
+  public async init() {
+    throwUnsupportedSignal(this.init.name, DestroyedState.name)
+  }
+
+  public async destroy() {
+    throwUnsupportedSignal(this.destroy.name, DestroyedState.name)
+  }
+
+  public handleMessage() {
+    // Ignore all messages after the consumer was destroyed
   }
 }
 
@@ -197,7 +252,7 @@ function throwUnsupportedSignal(signal: string, state: string) {
   throw new Error(`Unsupported signal '${signal}' in state '${state}'`)
 }
 
-function promise(executor: (fulfil: (err?: Error) => void) => void): Promise<void> {
+function deferred(executor: (fulfil: (err?: Error) => void) => void): Promise<void> {
   return new Promise<void>((res, rej) => {
     executor(err => {
       if (err) {
