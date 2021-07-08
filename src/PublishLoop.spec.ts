@@ -13,10 +13,9 @@ test('trigger: idle state', async () => {
   expect(loop.trigger()).toEqual({alreadyStarted: false})
 
   expect(loop.stats()).toEqual({
+    state: 'Initial',
     processingMessageCount: 0,
-    processedMessageCount: 0,
-    isLoopInProgress: false,
-    isDestroyed: false
+    processedMessageCount: 0
   })
 })
 
@@ -29,10 +28,9 @@ test('trigger: do not miss scheduled async call', async () => {
   expect(await promise).toEqual({alreadyStarted: false})
 
   expect(loop.stats()).toEqual({
+    state: 'Initial',
     processingMessageCount: 0,
-    processedMessageCount: 0,
-    isLoopInProgress: false,
-    isDestroyed: false
+    processedMessageCount: 0
   })
 })
 

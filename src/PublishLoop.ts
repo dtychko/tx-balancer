@@ -1,9 +1,9 @@
 import ExecutionSerializer from '@targetprocess/balancer-core/bin/MessageBalancer.Serializer'
-import MessageBalancer3, {MessageRef} from './balancing/MessageBalancer3'
-import {emptyBuffer} from './constants'
-import {QState} from './qState'
 import {MessageProperties} from 'amqplib'
 import {Publisher} from './amqp/Publisher'
+import MessageBalancer3, {MessageRef} from './balancing/MessageBalancer3'
+import {emptyBuffer} from './constants'
+import {QState} from './QState'
 import {setImmediateAsync, waitFor} from './utils'
 
 interface PublishLoopContext {
@@ -14,218 +14,352 @@ interface PublishLoopContext {
   readonly partitionGroupHeader: string
   readonly partitionKeyHeader: string
   readonly onError: (err: Error) => void
-  readonly setState: (state: PublishLoopState) => Promise<void>
-  processingMessageCount: number
-  processedMessageCount: number
-  isLoopInProgress: boolean
-  isDestroyed: boolean
+  readonly executor: ExecutionSerializer
+
+  readonly compareExchangeState: (toState: PublishLoopState, fromState: PublishLoopState) => boolean
 }
 
 interface PublishLoopState {
-  trigger: () => {alreadyStarted: boolean}
+  readonly onEnter?: () => void
+  readonly onExit?: () => void
+
+  readonly stats: () => PublishLoopStats
+  readonly connectTo: (params: ConnectToParams) => void
+  readonly trigger: () => {alreadyStarted: boolean}
   readonly destroy: () => Promise<void>
-  readonly waitForEnter?: () => Promise<void>
+}
+
+interface PublishLoopStats {
+  state: 'Initial' | 'Ready' | 'LoopInProgress' | 'Error' | 'Destroyed'
+  processingMessageCount: number
+  processedMessageCount: number
+}
+
+interface ConnectToParams {
+  publisher: Publisher
+  qState: QState
+  messageBalancer: MessageBalancer3
+  mirrorQueueName: (queueName: string) => string
+  partitionGroupHeader: string
+  partitionKeyHeader: string
+  onError: (err: Error) => void
 }
 
 export default class PublishLoop {
-  private ctx: PublishLoopContext | undefined
-  private state: PublishLoopState = idleState()
+  private state: PublishLoopState
+
+  constructor() {
+    this.state = new InitialState({
+      compareExchangeState: (toState, fromState) => {
+        if (fromState !== this.state) {
+          return false
+        }
+
+        if (this.state.onExit) {
+          this.state.onExit()
+        }
+
+        this.state = toState
+
+        if (this.state.onEnter) {
+          this.state.onEnter()
+        }
+
+        return true
+      }
+    })
+
+    if (this.state.onEnter) {
+      this.state.onEnter()
+    }
+  }
 
   public stats() {
-    const {
-      processingMessageCount = 0,
-      processedMessageCount = 0,
-      isLoopInProgress = false,
-      isDestroyed = false
-    } = this.ctx || {}
-
-    return {processingMessageCount, processedMessageCount, isLoopInProgress, isDestroyed}
+    return this.state.stats()
   }
 
-  public connectTo(params: {
-    publisher: Publisher
-    qState: QState
-    messageBalancer: MessageBalancer3
-    mirrorQueueName: (queueName: string) => string
-    partitionGroupHeader: string
-    partitionKeyHeader: string
-    onError: (err: Error) => void
-  }) {
-    const {publisher, qState, messageBalancer, mirrorQueueName, partitionGroupHeader, partitionKeyHeader, onError} =
-      params
-
-    this.ctx = {
-      publisher,
-      qState,
-      messageBalancer,
-      mirrorQueueName,
-      partitionGroupHeader,
-      partitionKeyHeader,
-      onError,
-      setState: async state => {
-        this.state = state
-        if (this.state.waitForEnter) {
-          await this.state.waitForEnter()
-        }
-      },
-      processingMessageCount: 0,
-      processedMessageCount: 0,
-      isLoopInProgress: false,
-      isDestroyed: false
-    }
-
-    this.state = connectedState(this.ctx)
+  public connectTo(params: ConnectToParams) {
+    this.state.connectTo(params)
   }
 
-  public trigger(): {alreadyStarted: boolean} {
+  public trigger() {
     return this.state.trigger()
   }
 
   public async destroy() {
-    await this.state.destroy()
+    await this.state.destroy
   }
 }
 
-function idleState(): PublishLoopState {
-  return {
-    trigger() {
-      return {alreadyStarted: false}
-    },
-    async destroy() {
-      // TODO: Move to destroyed state instead of throwing
-      throwUnsupportedSignal(this.destroy.name, idleState.name)
-    }
+class InitialState implements PublishLoopState {
+  constructor(
+    private readonly ctx: {compareExchangeState: (toState: PublishLoopState, fromState: PublishLoopState) => boolean}
+  ) {}
+
+  public stats() {
+    return {
+      state: 'Initial',
+      processingMessageCount: 0,
+      processedMessageCount: 0
+    } as PublishLoopStats
+  }
+
+  public connectTo(params: ConnectToParams) {
+    this.ctx.compareExchangeState(
+      new ReadyState(
+        {
+          ...params,
+          executor: new ExecutionSerializer(),
+          compareExchangeState: this.ctx.compareExchangeState
+        },
+        {
+          statistics: {processingMessageCount: 0, processedMessageCount: 0}
+        }
+      ),
+      this
+    )
+  }
+
+  public trigger() {
+    return {alreadyStarted: false}
+  }
+
+  public async destroy() {
+    await deferred(onDestroyed => {
+      this.ctx.compareExchangeState(
+        new DestroyedState({statistics: {processingMessageCount: 0, processedMessageCount: 0}, onDestroyed}),
+        this
+      )
+    })
   }
 }
 
-function connectedState(ctx: PublishLoopContext): PublishLoopState {
-  const executor = new ExecutionSerializer()
+class ReadyState implements PublishLoopState {
+  constructor(
+    private readonly ctx: PublishLoopContext,
+    private readonly args: {statistics: {processingMessageCount: number; processedMessageCount: number}}
+  ) {}
 
-  return {
-    trigger: () => {
-      if (ctx.isLoopInProgress) {
-        return {alreadyStarted: true}
+  public stats() {
+    const {processingMessageCount, processedMessageCount} = this.args.statistics
+    return {
+      state: 'Ready',
+      processingMessageCount,
+      processedMessageCount
+    } as PublishLoopStats
+  }
+
+  public connectTo() {
+    throwUnsupportedSignal(this.connectTo.name, ReadyState.name)
+  }
+
+  public trigger() {
+    this.ctx.compareExchangeState(new LoopInProgressState(this.ctx, {statistics: this.args.statistics}), this)
+    return {alreadyStarted: false}
+  }
+
+  public async destroy() {
+    await deferred(onDestroyed => {
+      this.ctx.compareExchangeState(
+        new DestroyedState({statistics: {processingMessageCount: 0, processedMessageCount: 0}, onDestroyed}),
+        this
+      )
+    })
+  }
+}
+
+class LoopInProgressState implements PublishLoopState {
+  private isActive: boolean = true
+
+  constructor(
+    private readonly ctx: PublishLoopContext,
+    private readonly args: {statistics: {processingMessageCount: number; processedMessageCount: number}}
+  ) {}
+
+  public async onEnter() {
+    try {
+      for (let i = 1; this.isActive; i++) {
+        const messageRef = this.ctx.messageBalancer.tryDequeueMessage(partitionGroup =>
+          this.ctx.qState.canRegister(partitionGroup)
+        )
+
+        if (!messageRef) {
+          break
+        }
+
+        const {partitionGroup, partitionKey} = messageRef
+        const {queueMessageId, queueName} = this.ctx.qState.registerMessage(partitionGroup, partitionKey)
+
+        this.scheduleMessageProcessing(messageRef, queueMessageId, queueName)
+
+        if (i % 1 === 0) {
+          // Let's sometimes give a chance to either
+          // messages for other partitionGroup to be enqueued to messageBalancer
+          // or empty slots for other partitionGroup to be appeared in QState
+          await setImmediateAsync()
+        }
       }
-
-      ctx.isLoopInProgress = true
-      startLoop(ctx, executor)
-
-      return {alreadyStarted: false}
-    },
-    destroy: async () => {
-      await ctx.setState(destroyedState(ctx))
+    } catch (err) {
+      this.ctx.compareExchangeState(new ErrorState(this.ctx, {statistics: this.args.statistics, err}), this)
+    } finally {
+      this.ctx.compareExchangeState(new ReadyState(this.ctx, {statistics: this.args.statistics}), this)
     }
   }
-}
 
-function destroyedState(ctx: PublishLoopContext): PublishLoopState {
-  const destroyed = (async () => {
-    ctx.isDestroyed = true
-    await waitFor(() => !ctx.processingMessageCount)
-  })()
+  private async scheduleMessageProcessing(messageRef: MessageRef, queueMessageId: string, queueName: string) {
+    this.args.statistics.processingMessageCount += 1
 
-  return {
-    trigger() {
-      throwUnsupportedSignal(this.trigger.name, destroyedState.name)
-    },
-    async destroy() {
-      throwUnsupportedSignal(this.destroy.name, destroyedState.name)
-    },
-    async waitForEnter() {
-      await destroyed
-    }
-  }
-}
+    try {
+      const {messageId, partitionGroup, partitionKey} = messageRef
 
-async function startLoop(ctx: PublishLoopContext, executor: ExecutionSerializer) {
-  try {
-    for (let i = 1; ; i++) {
-      if (ctx.isDestroyed) {
-        // TODO: Log that the loop is stopped because of destroying
+      // TODO: Serialize message resolution by partitionGroup
+      // TODO: Preconditions:
+      // TODO:  * Improve ExecutionSerializer to cleanup serialization key registry to prevent memory leaks
+      const [, message] = await this.ctx.executor.serializeResolution(
+        'getMessage',
+        this.ctx.messageBalancer.getMessage(messageId)
+      )
+      const {content, properties} = message
+
+      // TODO: Replace with check like 'this.args.statistics.isStopped'
+      if (!this.isActive) {
         return
       }
 
-      const messageRef = ctx.messageBalancer.tryDequeueMessage(partitionGroup => ctx.qState.canRegister(partitionGroup))
-      if (!messageRef) {
-        // if (messageBalancer.size() && !qState.size()) {
-        //   console.error(`[Critical] Unpublished messages left: ${messageBalancer.size()} messages`)
-        //   process.exit(1)
-        // }
+      await Promise.all([
+        this.ctx.publisher.publishAsync('', this.ctx.mirrorQueueName(queueName), emptyBuffer, {
+          headers: {
+            [this.ctx.partitionGroupHeader]: partitionGroup,
+            [this.ctx.partitionKeyHeader]: partitionKey
+          },
+          persistent: true,
+          messageId: queueMessageId
+        }),
+        this.ctx.publisher.publishAsync('', queueName, content, {
+          ...(properties as MessageProperties),
+          persistent: true,
+          messageId: queueMessageId
+        })
+      ])
 
-        break
-      }
-
-      const {partitionGroup, partitionKey} = messageRef
-      const {queueMessageId, queueName} = ctx.qState.registerMessage(partitionGroup, partitionKey)
-
-      ctx.processingMessageCount += 1
-      scheduleMessageProcessing(ctx, executor, messageRef, queueMessageId, queueName)
-
-      if (i % 1 === 0) {
-        // Let's sometimes give a chance to either
-        // messages for other partitionGroup to be enqueued to messageBalancer
-        // or empty slots for other partitionGroup to be appeared in QState
-        await setImmediateAsync()
-      }
+      await this.ctx.messageBalancer.removeMessage(messageId)
+    } catch (err) {
+      this.ctx.compareExchangeState(new ErrorState(this.ctx, {statistics: this.args.statistics, err}), this)
+    } finally {
+      this.args.statistics.processingMessageCount -= 1
+      this.args.statistics.processedMessageCount += 1
     }
-  } catch (err) {
-    // TODO: Log error with a real logger
-    console.error(err)
+  }
 
-    ctx.onError(err)
-  } finally {
-    ctx.isLoopInProgress = false
+  public onExit() {
+    this.isActive = false
+  }
+
+  public stats() {
+    const {processingMessageCount, processedMessageCount} = this.args.statistics
+    return {
+      state: 'LoopInProgress',
+      processingMessageCount,
+      processedMessageCount
+    } as PublishLoopStats
+  }
+
+  public connectTo() {
+    throwUnsupportedSignal(this.connectTo.name, ErrorState.name)
+  }
+
+  public trigger() {
+    return {alreadyStarted: true}
+  }
+
+  public async destroy() {
+    await deferred(onDestroyed => {
+      this.ctx.compareExchangeState(new DestroyedState({statistics: this.args.statistics, onDestroyed}), this)
+    })
   }
 }
 
-async function scheduleMessageProcessing(
-  ctx: PublishLoopContext,
-  executor: ExecutionSerializer,
-  messageRef: MessageRef,
-  queueMessageId: string,
-  queueName: string
-) {
-  try {
-    const {messageId, partitionGroup, partitionKey} = messageRef
+class ErrorState implements PublishLoopState {
+  constructor(
+    private readonly ctx: PublishLoopContext,
+    private readonly args: {statistics: {processingMessageCount: number; processedMessageCount: number}; err: Error}
+  ) {}
 
-    // TODO: Serialize message resolution by partitionGroup
-    // TODO: Preconditions:
-    // TODO:  * Improve ExecutionSerializer to cleanup serialization key registry to prevent memory leaks
-    const [, message] = await executor.serializeResolution('getMessage', ctx.messageBalancer.getMessage(messageId))
-    const {content, properties} = message
+  public onEnter() {
+    this.ctx.onError(this.args.err)
+  }
 
-    if (ctx.isDestroyed) {
-      return
+  public stats() {
+    const {processingMessageCount, processedMessageCount} = this.args.statistics
+    return {
+      state: 'Error',
+      processingMessageCount,
+      processedMessageCount
+    } as PublishLoopStats
+  }
+
+  public connectTo() {
+    throwUnsupportedSignal(this.connectTo.name, ErrorState.name)
+  }
+
+  public trigger() {
+    return {alreadyStarted: false}
+  }
+
+  public async destroy() {
+    await deferred(onDestroyed => {
+      this.ctx.compareExchangeState(new DestroyedState({statistics: this.args.statistics, onDestroyed}), this)
+    })
+  }
+}
+
+class DestroyedState implements PublishLoopState {
+  constructor(
+    private readonly args: {
+      statistics: {processingMessageCount: number; processedMessageCount: number}
+      onDestroyed: (err?: Error) => void
     }
+  ) {}
 
-    await Promise.all([
-      ctx.publisher.publishAsync('', ctx.mirrorQueueName(queueName), emptyBuffer, {
-        headers: {
-          [ctx.partitionGroupHeader]: partitionGroup,
-          [ctx.partitionKeyHeader]: partitionKey
-        },
-        persistent: true,
-        messageId: queueMessageId
-      }),
-      ctx.publisher.publishAsync('', queueName, content, {
-        ...(properties as MessageProperties),
-        persistent: true,
-        messageId: queueMessageId
-      })
-    ])
+  public async onEnter() {
+    await waitFor(() => !this.args.statistics.processingMessageCount)
+    this.args.onDestroyed()
+  }
 
-    await ctx.messageBalancer.removeMessage(messageId)
-  } catch (err) {
-    // TODO: Log error with a logger
-    console.error(err)
+  public stats() {
+    const {processingMessageCount, processedMessageCount} = this.args.statistics
+    return {
+      state: 'Destroyed',
+      processingMessageCount,
+      processedMessageCount
+    } as PublishLoopStats
+  }
 
-    ctx.onError(err)
-  } finally {
-    ctx.processingMessageCount -= 1
-    ctx.processedMessageCount += 1
+  public connectTo() {
+    throwUnsupportedSignal(this.connectTo.name, DestroyedState.name)
+  }
+
+  public trigger() {
+    return {alreadyStarted: false}
+  }
+
+  public async destroy() {
+    await waitFor(() => !this.args.statistics.processingMessageCount)
   }
 }
 
 function throwUnsupportedSignal(signal: string, state: string): never {
   throw new Error(`Unsupported signal '${signal}' in state '${state}'`)
+}
+
+function deferred(executor: (fulfil: (err?: Error) => void) => void): Promise<void> {
+  return new Promise<void>((res, rej) => {
+    executor(err => {
+      if (err) {
+        rej(err)
+      } else {
+        res()
+      }
+    })
+  })
 }
