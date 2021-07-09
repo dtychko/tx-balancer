@@ -9,25 +9,10 @@ import {QState} from './QState'
 test('trigger: idle state', async () => {
   const loop = new PublishLoop()
 
-  expect(loop.trigger()).toEqual({alreadyStarted: false})
-  expect(loop.trigger()).toEqual({alreadyStarted: false})
+  expect(loop.trigger()).toEqual({started: false})
+  expect(loop.trigger()).toEqual({started: false})
 
-  expect(loop.stats()).toEqual({
-    state: 'Initial',
-    processingMessageCount: 0,
-    processedMessageCount: 0
-  })
-})
-
-test('trigger: do not miss scheduled async call', async () => {
-  const loop = new PublishLoop()
-
-  const promise = Promise.resolve().then(() => loop.trigger())
-
-  expect(loop.trigger()).toEqual({alreadyStarted: false})
-  expect(await promise).toEqual({alreadyStarted: false})
-
-  expect(loop.stats()).toEqual({
+  expect(loop.status()).toEqual({
     state: 'Initial',
     processingMessageCount: 0,
     processedMessageCount: 0
@@ -66,10 +51,10 @@ test('trigger: common scenarios', async () => {
     onError: () => {}
   })
 
-  expect(loop.trigger()).toEqual({alreadyStarted: false})
-  expect(loop.trigger()).toEqual({alreadyStarted: true})
+  expect(loop.trigger()).toEqual({started: true})
+  expect(loop.trigger()).toEqual({started: false})
 
-  await waitFor(() => loop.stats().processedMessageCount == 2)
+  await waitFor(() => loop.status().processedMessageCount == 2)
 
   expect(qStateState.registerMessageCalls).toEqual([
     {partitionGroup: 'group/1', partitionKey: 'key/1'},
@@ -176,7 +161,7 @@ test('trigger: serialize message publishing by partition group (actually, serial
   awaiters[1]()
   awaiters[0]()
 
-  await waitFor(() => loop.stats().processedMessageCount === 3)
+  await waitFor(() => loop.status().processedMessageCount === 3)
 
   expect(publisherState.publishAsyncCalls).toEqual([
     {

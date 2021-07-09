@@ -6,30 +6,35 @@ import {emptyBuffer} from './constants'
 import {QState} from './QState'
 import {setImmediateAsync, waitFor} from './utils'
 
-interface PublishLoopContext {
-  readonly publisher: Publisher
-  readonly qState: QState
-  readonly messageBalancer: MessageBalancer3
-  readonly mirrorQueueName: (queueName: string) => string
-  readonly partitionGroupHeader: string
-  readonly partitionKeyHeader: string
-  readonly onError: (err: Error) => void
-  readonly executor: ExecutionSerializer
+interface PublishLoopContext extends ConnectToParams {
+  executor: ExecutionSerializer
+  statistics: PublishLoopStatistics
+  cancellationToken: CancellationToken
 
-  readonly compareExchangeState: (toState: PublishLoopState, fromState: PublishLoopState) => boolean
+  compareExchangeState: CompareExchangeState
 }
+
+interface PublishLoopStatistics {
+  processingMessageCount: number
+  processedMessageCount: number
+}
+
+interface CancellationToken {
+  isCanceled: boolean
+}
+
+type CompareExchangeState = (toState: PublishLoopState, fromState: PublishLoopState) => boolean
 
 interface PublishLoopState {
-  readonly onEnter?: () => void
-  readonly onExit?: () => void
+  onEnter?: () => void
 
-  readonly stats: () => PublishLoopStats
-  readonly connectTo: (params: ConnectToParams) => void
-  readonly trigger: () => {alreadyStarted: boolean}
-  readonly destroy: () => Promise<void>
+  status: () => PublishLoopStatus
+  connectTo: (params: ConnectToParams) => void
+  trigger: () => {started: boolean}
+  destroy: () => Promise<void>
 }
 
-interface PublishLoopStats {
+interface PublishLoopStatus {
   state: 'Initial' | 'Ready' | 'LoopInProgress' | 'Error' | 'Destroyed'
   processingMessageCount: number
   processedMessageCount: number
@@ -51,21 +56,7 @@ export default class PublishLoop {
   constructor() {
     this.state = new InitialState({
       compareExchangeState: (toState, fromState) => {
-        if (fromState !== this.state) {
-          return false
-        }
-
-        if (this.state.onExit) {
-          this.state.onExit()
-        }
-
-        this.state = toState
-
-        if (this.state.onEnter) {
-          this.state.onEnter()
-        }
-
-        return true
+        return this.state !== (this.state = compareExchangeState(this.state, toState, fromState))
       }
     })
 
@@ -74,8 +65,8 @@ export default class PublishLoop {
     }
   }
 
-  public stats() {
-    return this.state.stats()
+  public status() {
+    return this.state.status()
   }
 
   public connectTo(params: ConnectToParams) {
@@ -92,42 +83,45 @@ export default class PublishLoop {
 }
 
 class InitialState implements PublishLoopState {
-  constructor(
-    private readonly ctx: {compareExchangeState: (toState: PublishLoopState, fromState: PublishLoopState) => boolean}
-  ) {}
+  constructor(private readonly ctx: {compareExchangeState: CompareExchangeState}) {}
 
-  public stats() {
+  public status() {
     return {
       state: 'Initial',
       processingMessageCount: 0,
       processedMessageCount: 0
-    } as PublishLoopStats
+    } as PublishLoopStatus
   }
 
   public connectTo(params: ConnectToParams) {
     this.ctx.compareExchangeState(
-      new ReadyState(
-        {
-          ...params,
-          executor: new ExecutionSerializer(),
-          compareExchangeState: this.ctx.compareExchangeState
-        },
-        {
-          statistics: {processingMessageCount: 0, processedMessageCount: 0}
-        }
-      ),
+      new ReadyState({
+        ...params,
+        executor: new ExecutionSerializer(),
+        statistics: {processingMessageCount: 0, processedMessageCount: 0},
+        cancellationToken: {isCanceled: false},
+        compareExchangeState: this.ctx.compareExchangeState
+      }),
       this
     )
   }
 
   public trigger() {
-    return {alreadyStarted: false}
+    return {started: false}
   }
 
   public async destroy() {
     await deferred(onDestroyed => {
       this.ctx.compareExchangeState(
-        new DestroyedState({statistics: {processingMessageCount: 0, processedMessageCount: 0}, onDestroyed}),
+        new DestroyedState(
+          {
+            statistics: {processingMessageCount: 0, processedMessageCount: 0},
+            cancellationToken: {isCanceled: false}
+          },
+          {
+            onDestroyed
+          }
+        ),
         this
       )
     })
@@ -135,18 +129,15 @@ class InitialState implements PublishLoopState {
 }
 
 class ReadyState implements PublishLoopState {
-  constructor(
-    private readonly ctx: PublishLoopContext,
-    private readonly args: {statistics: {processingMessageCount: number; processedMessageCount: number}}
-  ) {}
+  constructor(private readonly ctx: PublishLoopContext) {}
 
-  public stats() {
-    const {processingMessageCount, processedMessageCount} = this.args.statistics
+  public status() {
+    const {processingMessageCount, processedMessageCount} = this.ctx.statistics
     return {
       state: 'Ready',
       processingMessageCount,
       processedMessageCount
-    } as PublishLoopStats
+    } as PublishLoopStatus
   }
 
   public connectTo() {
@@ -154,31 +145,23 @@ class ReadyState implements PublishLoopState {
   }
 
   public trigger() {
-    this.ctx.compareExchangeState(new LoopInProgressState(this.ctx, {statistics: this.args.statistics}), this)
-    return {alreadyStarted: false}
+    this.ctx.compareExchangeState(new LoopInProgressState(this.ctx), this)
+    return {started: true}
   }
 
   public async destroy() {
     await deferred(onDestroyed => {
-      this.ctx.compareExchangeState(
-        new DestroyedState({statistics: {processingMessageCount: 0, processedMessageCount: 0}, onDestroyed}),
-        this
-      )
+      this.ctx.compareExchangeState(new DestroyedState(this.ctx, {onDestroyed}), this)
     })
   }
 }
 
 class LoopInProgressState implements PublishLoopState {
-  private isActive: boolean = true
-
-  constructor(
-    private readonly ctx: PublishLoopContext,
-    private readonly args: {statistics: {processingMessageCount: number; processedMessageCount: number}}
-  ) {}
+  constructor(private readonly ctx: PublishLoopContext) {}
 
   public async onEnter() {
     try {
-      for (let i = 1; this.isActive; i++) {
+      for (let i = 1; !this.ctx.cancellationToken.isCanceled; i++) {
         const messageRef = this.ctx.messageBalancer.tryDequeueMessage(partitionGroup =>
           this.ctx.qState.canRegister(partitionGroup)
         )
@@ -200,14 +183,14 @@ class LoopInProgressState implements PublishLoopState {
         }
       }
     } catch (err) {
-      this.ctx.compareExchangeState(new ErrorState(this.ctx, {statistics: this.args.statistics, err}), this)
+      this.ctx.compareExchangeState(new ErrorState(this.ctx, {err}), this)
     } finally {
-      this.ctx.compareExchangeState(new ReadyState(this.ctx, {statistics: this.args.statistics}), this)
+      this.ctx.compareExchangeState(new ReadyState(this.ctx), this)
     }
   }
 
   private async scheduleMessageProcessing(messageRef: MessageRef, queueMessageId: string, queueName: string) {
-    this.args.statistics.processingMessageCount += 1
+    this.ctx.statistics.processingMessageCount += 1
 
     try {
       const {messageId, partitionGroup, partitionKey} = messageRef
@@ -221,8 +204,7 @@ class LoopInProgressState implements PublishLoopState {
       )
       const {content, properties} = message
 
-      // TODO: Replace with check like 'this.args.statistics.isStopped'
-      if (!this.isActive) {
+      if (this.ctx.cancellationToken.isCanceled) {
         return
       }
 
@@ -244,24 +226,20 @@ class LoopInProgressState implements PublishLoopState {
 
       await this.ctx.messageBalancer.removeMessage(messageId)
     } catch (err) {
-      this.ctx.compareExchangeState(new ErrorState(this.ctx, {statistics: this.args.statistics, err}), this)
+      this.ctx.compareExchangeState(new ErrorState(this.ctx, {err}), this)
     } finally {
-      this.args.statistics.processingMessageCount -= 1
-      this.args.statistics.processedMessageCount += 1
+      this.ctx.statistics.processingMessageCount -= 1
+      this.ctx.statistics.processedMessageCount += 1
     }
   }
 
-  public onExit() {
-    this.isActive = false
-  }
-
-  public stats() {
-    const {processingMessageCount, processedMessageCount} = this.args.statistics
+  public status() {
+    const {processingMessageCount, processedMessageCount} = this.ctx.statistics
     return {
       state: 'LoopInProgress',
       processingMessageCount,
       processedMessageCount
-    } as PublishLoopStats
+    } as PublishLoopStatus
   }
 
   public connectTo() {
@@ -269,33 +247,31 @@ class LoopInProgressState implements PublishLoopState {
   }
 
   public trigger() {
-    return {alreadyStarted: true}
+    return {started: false}
   }
 
   public async destroy() {
     await deferred(onDestroyed => {
-      this.ctx.compareExchangeState(new DestroyedState({statistics: this.args.statistics, onDestroyed}), this)
+      this.ctx.compareExchangeState(new DestroyedState(this.ctx, {onDestroyed}), this)
     })
   }
 }
 
 class ErrorState implements PublishLoopState {
-  constructor(
-    private readonly ctx: PublishLoopContext,
-    private readonly args: {statistics: {processingMessageCount: number; processedMessageCount: number}; err: Error}
-  ) {}
+  constructor(private readonly ctx: PublishLoopContext, private readonly args: {err: Error}) {}
 
   public onEnter() {
+    this.ctx.cancellationToken.isCanceled = true
     this.ctx.onError(this.args.err)
   }
 
-  public stats() {
-    const {processingMessageCount, processedMessageCount} = this.args.statistics
+  public status() {
+    const {processingMessageCount, processedMessageCount} = this.ctx.statistics
     return {
       state: 'Error',
       processingMessageCount,
       processedMessageCount
-    } as PublishLoopStats
+    } as PublishLoopStatus
   }
 
   public connectTo() {
@@ -303,36 +279,40 @@ class ErrorState implements PublishLoopState {
   }
 
   public trigger() {
-    return {alreadyStarted: false}
+    return {started: false}
   }
 
   public async destroy() {
     await deferred(onDestroyed => {
-      this.ctx.compareExchangeState(new DestroyedState({statistics: this.args.statistics, onDestroyed}), this)
+      this.ctx.compareExchangeState(new DestroyedState(this.ctx, {onDestroyed}), this)
     })
   }
 }
 
 class DestroyedState implements PublishLoopState {
   constructor(
+    private readonly ctx: {
+      statistics: PublishLoopStatistics
+      cancellationToken: CancellationToken
+    },
     private readonly args: {
-      statistics: {processingMessageCount: number; processedMessageCount: number}
       onDestroyed: (err?: Error) => void
     }
   ) {}
 
   public async onEnter() {
-    await waitFor(() => !this.args.statistics.processingMessageCount)
+    this.ctx.cancellationToken.isCanceled = true
+    await waitFor(() => !this.ctx.statistics.processingMessageCount)
     this.args.onDestroyed()
   }
 
-  public stats() {
-    const {processingMessageCount, processedMessageCount} = this.args.statistics
+  public status() {
+    const {processingMessageCount, processedMessageCount} = this.ctx.statistics
     return {
       state: 'Destroyed',
       processingMessageCount,
       processedMessageCount
-    } as PublishLoopStats
+    } as PublishLoopStatus
   }
 
   public connectTo() {
@@ -340,12 +320,32 @@ class DestroyedState implements PublishLoopState {
   }
 
   public trigger() {
-    return {alreadyStarted: false}
+    return {started: false}
   }
 
   public async destroy() {
-    await waitFor(() => !this.args.statistics.processingMessageCount)
+    await waitFor(() => !this.ctx.statistics.processingMessageCount)
   }
+}
+
+function compareExchangeState<TState extends {onEnter?: () => void; onExit?: () => void}>(
+  currentState: TState,
+  toState: TState,
+  fromState: TState
+): TState {
+  if (fromState !== currentState) {
+    return currentState
+  }
+
+  if (fromState.onExit) {
+    fromState.onExit()
+  }
+
+  if (toState.onEnter) {
+    toState.onEnter()
+  }
+
+  return toState
 }
 
 function throwUnsupportedSignal(signal: string, state: string): never {
