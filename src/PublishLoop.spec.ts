@@ -7,15 +7,21 @@ import PublishLoop from './PublishLoop'
 import {QState} from './QState'
 
 test('trigger: idle state', async () => {
-  const loop = new PublishLoop()
+  const loop = new PublishLoop({
+    mirrorQueueName: queue => `${queue}/mirror`,
+    partitionGroupHeader: 'x-partition-group',
+    partitionKeyHeader: 'x-partition-key',
+    onError: () => {}
+  })
 
   expect(loop.trigger()).toEqual({started: false})
   expect(loop.trigger()).toEqual({started: false})
 
   expect(loop.status()).toEqual({
-    state: 'Initial',
+    state: 'InitialState',
     processingMessageCount: 0,
-    processedMessageCount: 0
+    processedMessageCount: 0,
+    failedMessageCount: 0
   })
 })
 
@@ -39,16 +45,17 @@ test('trigger: common scenarios', async () => {
     }
   ])
 
-  const loop = new PublishLoop()
-
-  loop.connectTo({
-    publisher,
-    qState,
-    messageBalancer,
+  const loop = new PublishLoop({
     mirrorQueueName: queue => `${queue}/mirror`,
     partitionGroupHeader: 'x-partition-group',
     partitionKeyHeader: 'x-partition-key',
     onError: () => {}
+  })
+
+  loop.connectTo({
+    publisher,
+    qState,
+    messageBalancer
   })
 
   expect(loop.trigger()).toEqual({started: true})
@@ -141,16 +148,17 @@ test('trigger: serialize message publishing by partition group (actually, serial
     return getMessage.call(messageBalancer, messageId)
   }
 
-  const loop = new PublishLoop()
-
-  loop.connectTo({
-    publisher,
-    qState,
-    messageBalancer,
+  const loop = new PublishLoop({
     mirrorQueueName: queue => `${queue}/mirror`,
     partitionGroupHeader: 'x-partition-group',
     partitionKeyHeader: 'x-partition-key',
     onError: () => {}
+  })
+
+  loop.connectTo({
+    publisher,
+    qState,
+    messageBalancer
   })
 
   loop.trigger()

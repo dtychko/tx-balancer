@@ -48,7 +48,12 @@ async function main() {
   await assertResources(qStateCh, true)
   console.log('asserted resources')
 
-  const publishLoop = new PublishLoop()
+  const publishLoop = new PublishLoop({
+    mirrorQueueName,
+    partitionGroupHeader,
+    partitionKeyHeader,
+    onError: () => {}
+  })
   console.log('created PublishLoop')
 
   const pool = new Pool({
@@ -95,11 +100,7 @@ async function main() {
   publishLoop.connectTo({
     publisher: new Publisher(loopCh),
     qState,
-    messageBalancer,
-    mirrorQueueName,
-    partitionGroupHeader,
-    partitionKeyHeader,
-    onError: () => {}
+    messageBalancer
   })
   console.log('connected PublishLoop')
 
