@@ -12,7 +12,7 @@ async function main() {
   console.log('started fake clients')
 }
 
-async function startFakeClients(conn: Connection, count: number) {
+export async function startFakeClients(conn: Connection, count: number) {
   const clientCh = await conn.createConfirmChannel()
   const publisher = new Publisher(clientCh)
 

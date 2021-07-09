@@ -12,6 +12,7 @@ import {
   inputChannelPrefetchCount,
   inputQueueName,
   mirrorQueueName,
+  outputQueueCount,
   partitionGroupHeader,
   partitionKeyHeader,
   postgresConnectionString,
@@ -22,6 +23,7 @@ import {Pool} from 'pg'
 import {Publisher} from './amqp/Publisher'
 import {startFakePublisher} from './fake.publisher'
 import {connect} from './amqp/connect'
+import {startFakeClients} from './fake.client'
 
 process.on('uncaughtException', err => {
   console.error('[CRITICAL] uncaughtException: ' + err)
@@ -109,7 +111,7 @@ async function main() {
 
   // await startFakeClients(fakeConn, outputQueueCount)
   // console.log('started fake clients')
-
+  //
   // const publishedCount = await startFakePublisher(fakeConn)
   // console.log(`started fake publisher ${publishedCount}`)
 

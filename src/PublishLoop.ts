@@ -5,6 +5,7 @@ import MessageBalancer3, {MessageRef} from './balancing/MessageBalancer3'
 import {emptyBuffer} from './constants'
 import {QState} from './QState'
 import {setImmediateAsync, waitFor} from './utils'
+import {callSafe, compareExchangeState, deferred, throwUnsupportedSignal} from './stateMachine'
 
 interface PublishLoopContext extends PublishLoopArgs {
   executor: ExecutionSerializer
@@ -62,28 +63,32 @@ interface ConnectToArgs {
 
 export default class PublishLoop {
   private readonly ctx: PublishLoopContext
-  private state: PublishLoopState
+  private readonly state: {value: PublishLoopState}
 
   constructor(args: PublishLoopArgs) {
     this.ctx = {
       ...args,
+
+      onError: err => {
+        callSafe(() => args.onError(err))
+      },
 
       executor: new ExecutionSerializer(),
       statistics: {processingMessageCount: 0, processedMessageCount: 0, failedMessageCount: 0},
       cancellationToken: {isCanceled: false},
 
       compareExchangeState: (toState, fromState) => {
-        return this.state !== (this.state = compareExchangeState(this.state, toState, fromState))
+        return compareExchangeState(this.state, toState, fromState)
       },
       processError: (err: Error) => {
-        this.state.processError(err)
+        this.state.value.processError(err)
       }
     }
 
-    this.state = new InitialState(this.ctx)
+    this.state = {value: new InitialState(this.ctx)}
 
-    if (this.state.onEnter) {
-      this.state.onEnter()
+    if (this.state.value.onEnter) {
+      this.state.value.onEnter()
     }
   }
 
@@ -91,7 +96,7 @@ export default class PublishLoop {
     const {processingMessageCount, processedMessageCount, failedMessageCount} = this.ctx.statistics
 
     return {
-      state: this.state.name,
+      state: this.state.value.name,
       processingMessageCount,
       processedMessageCount,
       failedMessageCount
@@ -99,15 +104,15 @@ export default class PublishLoop {
   }
 
   public connectTo(args: ConnectToArgs) {
-    this.state.connectTo(args)
+    this.state.value.connectTo(args)
   }
 
   public trigger() {
-    return this.state.trigger()
+    return this.state.value.trigger()
   }
 
   public async destroy() {
-    await this.state.destroy
+    await this.state.value.destroy
   }
 }
 
@@ -318,40 +323,4 @@ class DestroyedState implements PublishLoopState {
   public processError(err: Error) {
     this.ctx.onError(err)
   }
-}
-
-function compareExchangeState<TState extends {onEnter?: () => void; onExit?: () => void}>(
-  currentState: TState,
-  toState: TState,
-  fromState: TState
-): TState {
-  if (fromState !== currentState) {
-    return currentState
-  }
-
-  if (fromState.onExit) {
-    fromState.onExit()
-  }
-
-  if (toState.onEnter) {
-    toState.onEnter()
-  }
-
-  return toState
-}
-
-function throwUnsupportedSignal(signal: string, state: string): never {
-  throw new Error(`Unsupported signal '${signal}' in state '${state}'`)
-}
-
-function deferred(executor: (fulfil: (err?: Error) => void) => void): Promise<void> {
-  return new Promise<void>((res, rej) => {
-    executor(err => {
-      if (err) {
-        rej(err)
-      } else {
-        res()
-      }
-    })
-  })
 }

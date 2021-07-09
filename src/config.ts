@@ -1,5 +1,5 @@
 export const postgresConnectionString =
-  process.env.POSTGRES_CONNECTION_STRING || 'postgres://postgres:postgres@localhost:5432/postgres'
+  process.env.POSTGRES_CONNECTION_STRING || 'postgres://postgres:postgres@localhost:5434/postgres'
 export const postgresPoolMax = 2
 
 export const amqpUri = process.env.AMQP_URI || 'amqp://guest:guest@localhost:5672/'
