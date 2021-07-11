@@ -1,195 +1,306 @@
 import {ConfirmChannel, Message} from 'amqplib'
-import {inputQueueName, partitionGroupHeader, partitionKeyHeader} from './config'
 import {QState} from './QState'
+import {callSafe, compareExchangeState, deferred, throwUnsupportedSignal} from './stateMachine'
+import {partitionGroupHeader, partitionKeyHeader} from './config'
 import {nanoid} from 'nanoid'
 import {publishAsync} from './amqp/publishAsync'
 import {emptyBuffer} from './constants'
 
-interface ConsumerContext {
-  readonly ch: ConfirmChannel
-  readonly qState: QState
-  readonly mirrorQueueName: string
-  readonly outputQueueName: string
-  readonly partitionGroupHeader: string
-  readonly partitionKeyHeader: string
+interface ConsumerContext extends ConsumerArgs {
+  cancellationToken: CancellationToken
 
-  readonly setState: (state: ConsumerState) => Promise<void>
-  readonly onError: (err: Error) => void
-  readonly onInitialized: () => void
-  readonly onCanceled: () => void
-  readonly waitForInitialized: () => Promise<void>
+  compareExchangeState: (toState: ConsumerState, fromState: ConsumerState) => boolean
+  processMessage: (msg: Message) => void
+  processError: (err: Error) => void
+}
 
-  readonly markerMessageId: string
-  readonly isInitialized: boolean
-  readonly isStopped: boolean
+interface ConsumerArgs {
+  ch: ConfirmChannel
+  qState: QState
+  onError: (err: Error) => void
+  mirrorQueueName: string
+  outputQueueName: string
+  partitionGroupHeader: string
+  partitionKeyHeader: string
+}
+
+interface CancellationToken {
+  isCanceled: boolean
 }
 
 interface ConsumerState {
-  readonly consume: () => Promise<void>
-  readonly cancel: () => Promise<void>
-  readonly waitForEnter?: () => Promise<void>
+  name: string
+  onEnter?: () => void
+
+  init: () => Promise<void>
+  destroy: () => Promise<void>
+  processMessage: (msg: Message) => void
+  processError: (err: Error) => void
 }
 
 export default class MirrorQueueConsumer {
-  private state: ConsumerState
+  private readonly ctx: ConsumerContext
+  private readonly state: {value: ConsumerState}
 
-  constructor(params: {
-    ch: ConfirmChannel
-    qState: QState
-    onError: (err: Error) => void
-    mirrorQueueName: string
-    outputQueueName: string
-    partitionGroupHeader: string
-    partitionKeyHeader: string
-  }) {
-    const {ch, qState, onError, mirrorQueueName, outputQueueName, partitionGroupHeader, partitionKeyHeader} = params
+  constructor(args: ConsumerArgs) {
+    this.ctx = {
+      ...args,
 
-    let initializedRes: () => void
-    let initializedRej: () => void
-    const initialized = new Promise<void>((res, rej) => {
-      initializedRes = res
-      initializedRej = rej
+      onError: err => {
+        callSafe(() => args.onError(err))
+      },
+
+      cancellationToken: {isCanceled: false},
+
+      compareExchangeState: (toState, fromState) => {
+        return compareExchangeState(this.state, toState, fromState)
+      },
+      processMessage: msg => {
+        this.state.value.processMessage(msg)
+      },
+      processError: err => {
+        this.state.value.processError(err)
+      }
+    }
+
+    this.state = {value: new InitialState(this.ctx)}
+
+    if (this.state.value.onEnter) {
+      this.state.value.onEnter()
+    }
+  }
+
+  public status() {
+    return {
+      state: this.state.value.name
+    }
+  }
+
+  public init() {
+    return this.state.value.init()
+  }
+
+  public destroy() {
+    return this.state.value.destroy()
+  }
+}
+
+class InitialState implements ConsumerState {
+  public readonly name = this.constructor.name
+
+  constructor(private readonly ctx: ConsumerContext) {}
+
+  public async init() {
+    await deferred(onInitialized => {
+      this.ctx.compareExchangeState(new InitializingState(this.ctx, {onInitialized}), this)
     })
-
-    const ctx = {
-      ch,
-      qState,
-      mirrorQueueName,
-      outputQueueName,
-      partitionGroupHeader,
-      partitionKeyHeader,
-
-      setState: async (state: ConsumerState) => {
-        this.state = state
-        if (this.state.waitForEnter) {
-          await this.state.waitForEnter()
-        }
-      },
-      onError: (err: Error) => {
-        ctx.isStopped = true
-        if (!ctx.isInitialized) {
-          initializedRej()
-        }
-        onError(err)
-      },
-      onInitialized: () => {
-        ctx.isInitialized = true
-        initializedRes()
-      },
-      onCanceled: () => {
-        ctx.isStopped = true
-      },
-      waitForInitialized: () => {
-        return initialized
-      },
-
-      markerMessageId: `__marker/${nanoid()}`,
-      isInitialized: false,
-      isStopped: false
-    }
-
-    this.state = initialState(ctx)
   }
 
-  consume() {
-    return this.state.consume()
-  }
-
-  async cancel() {
-    return this.state.cancel()
-  }
-}
-
-function initialState(ctx: ConsumerContext) {
-  return {
-    async consume() {
-      await ctx.setState(initializedState(ctx))
-    },
-    async cancel() {
-      throwUnsupportedSignal(this.cancel.name, initialState.name)
-    }
-  }
-}
-
-function initializedState(ctx: ConsumerContext) {
-  const consumerTagPromise = (async () => {
-    // TODO: handle errors
-    return (await ctx.ch.consume(inputQueueName, msg => handleMessage(ctx, msg), {noAck: false})).consumerTag
-  })()
-
-  ;(async () => {
-    // TODO: handle errors
-    await publishAsync(ctx.ch, '', ctx.mirrorQueueName, emptyBuffer, {
-      persistent: true,
-      messageId: ctx.markerMessageId
+  public async destroy() {
+    await deferred(onDestroyed => {
+      this.ctx.compareExchangeState(new DestroyedState(this.ctx, {onDestroyed}), this)
     })
-  })()
+  }
 
-  return {
-    async consume() {
-      throwUnsupportedSignal(this.consume.name, initializedState.name)
-    },
-    async cancel() {
-      await ctx.setState(canceledState(ctx, consumerTagPromise))
-    },
-    async waitForEnter() {
-      await ctx.waitForInitialized()
-    }
+  public processMessage(_: Message) {
+    throwUnsupportedSignal(this.processMessage.name, this.name)
+  }
+
+  public processError(_: Error) {
+    throwUnsupportedSignal(this.processError.name, this.name)
   }
 }
 
-function canceledState(ctx: ConsumerContext, consumerTagPromise: Promise<string>) {
-  const canceled = (async () => {
-    ctx.onCanceled()
-    await ctx.ch.cancel(await consumerTagPromise)
-  })()
+class InitializingState implements ConsumerState {
+  public readonly name = this.constructor.name
 
-  return {
-    async consume() {
-      throwUnsupportedSignal(this.consume.name, canceledState.name)
-    },
-    async cancel() {
-      throwUnsupportedSignal(this.cancel.name, canceledState.name)
-    },
-    async waitForEnter() {
-      await canceled
+  private readonly markerMessageId: string = `__marker/${nanoid()}`
+  private consumerTag!: Promise<string>
+
+  constructor(private readonly ctx: ConsumerContext, private readonly args: {onInitialized: (err?: Error) => void}) {}
+
+  public async onEnter() {
+    // TODO: move to ErrorState when channel is closed
+    // this.ctx.ch.once('close', () => {})
+    // this.ctx.ch.once('error', () => {})
+
+    this.consumerTag = (async () => {
+      const {consumerTag} = await this.ctx.ch.consume(this.ctx.mirrorQueueName, msg => this.onMessage(msg), {
+        noAck: false
+      })
+      return consumerTag
+    })()
+
+    try {
+      await publishAsync(this.ctx.ch, '', this.ctx.mirrorQueueName, emptyBuffer, {
+        persistent: true,
+        messageId: this.markerMessageId
+      })
+      await this.consumerTag
+
+      this.args.onInitialized()
+    } catch (err) {
+      this.ctx.processError(err)
     }
+  }
+
+  private onMessage(msg: Message | null) {
+    if (this.ctx.cancellationToken.isCanceled) {
+      return
+    }
+
+    if (!msg) {
+      this.ctx.processError(new Error('Consumer was canceled by broker'))
+      return
+    }
+
+    this.ctx.processMessage(msg)
+  }
+
+  public async init() {
+    throwUnsupportedSignal(this.init.name, this.name)
+  }
+
+  public async destroy() {
+    await deferred(onDestroyed => {
+      this.ctx.compareExchangeState(new DestroyedState(this.ctx, {consumerTag: this.consumerTag, onDestroyed}), this)
+    })
+  }
+
+  public processMessage(msg: Message) {
+    try {
+      const messageId = msg.properties.messageId
+
+      if (messageId === this.markerMessageId) {
+        this.ctx.ch.ack(msg)
+        this.ctx.compareExchangeState(new InitializedState(this.ctx, {consumerTag: this.consumerTag}), this)
+        this.args.onInitialized()
+        return
+      }
+
+      const deliveryTag = msg.fields.deliveryTag
+      const partitionGroup = msg.properties.headers[partitionGroupHeader]
+      const partitionKey = msg.properties.headers[partitionKeyHeader]
+
+      this.ctx.qState.restoreMessage(messageId, partitionGroup, partitionKey, this.ctx.outputQueueName)
+      this.ctx.qState.registerMirrorDeliveryTag(messageId, deliveryTag)
+    } catch (err) {
+      this.ctx.processError(err)
+    }
+  }
+
+  public processError(err: Error) {
+    this.ctx.compareExchangeState(new ErrorState(this.ctx, {consumerTag: this.consumerTag, err}), this)
+    this.args.onInitialized(err)
   }
 }
 
-async function handleMessage(ctx: ConsumerContext, msg: Message | null) {
-  if (ctx.isStopped) {
-    return
+class InitializedState implements ConsumerState {
+  public readonly name = this.constructor.name
+
+  constructor(private readonly ctx: ConsumerContext, private readonly args: {consumerTag: Promise<string>}) {}
+
+  public async init() {
+    throwUnsupportedSignal(this.init.name, this.name)
   }
 
-  if (!msg) {
-    ctx.onError(new Error('Input queue consumer was canceled by broker'))
-    return
+  public async destroy() {
+    await deferred(onDestroyed => {
+      this.ctx.compareExchangeState(
+        new DestroyedState(this.ctx, {consumerTag: this.args.consumerTag, onDestroyed}),
+        this
+      )
+    })
   }
 
-  const messageId = msg.properties.messageId
-  const deliveryTag = msg.fields.deliveryTag
+  public processMessage(msg: Message) {
+    try {
+      const deliveryTag = msg.fields.deliveryTag
+      const messageId = msg.properties.messageId
+      const {registered} = this.ctx.qState.registerMirrorDeliveryTag(messageId, deliveryTag)
 
-  if (ctx.isInitialized) {
-    const {registered} = ctx.qState.registerMirrorDeliveryTag(messageId, deliveryTag)
-    if (!registered) {
-      ctx.ch.ack(msg)
+      if (!registered) {
+        this.ctx.ch.ack(msg)
+      }
+    } catch (err) {
+      this.ctx.processError(err)
     }
-    return
   }
 
-  if (messageId === ctx.markerMessageId) {
-    ctx.ch.ack(msg)
-    ctx.onInitialized()
-    return
+  public processError(err: Error) {
+    this.ctx.compareExchangeState(new ErrorState(this.ctx, {consumerTag: this.args.consumerTag, err}), this)
   }
-
-  const partitionGroup = msg.properties.headers[partitionGroupHeader]
-  const partitionKey = msg.properties.headers[partitionKeyHeader]
-  ctx.qState.restoreMessage(messageId, partitionGroup, partitionKey, ctx.outputQueueName)
-  ctx.qState.registerMirrorDeliveryTag(messageId, deliveryTag)
 }
 
-function throwUnsupportedSignal(signal: string, state: string) {
-  throw new Error(`Unsupported signal '${signal}' in state '${state}'`)
+class ErrorState implements ConsumerState {
+  public readonly name = this.constructor.name
+
+  constructor(
+    private readonly ctx: ConsumerContext,
+    private readonly args: {consumerTag: Promise<string>; err: Error}
+  ) {}
+
+  public onEnter() {
+    this.ctx.cancellationToken.isCanceled = true
+    this.ctx.onError(this.args.err)
+  }
+
+  public async init() {
+    throwUnsupportedSignal(this.init.name, this.name)
+  }
+
+  public async destroy() {
+    await deferred(onDestroyed => {
+      this.ctx.compareExchangeState(
+        new DestroyedState(this.ctx, {consumerTag: this.args.consumerTag, onDestroyed}),
+        this
+      )
+    })
+  }
+
+  public processError(err: Error) {
+    this.ctx.onError(err)
+  }
+
+  public processMessage(_: Message) {}
+}
+
+class DestroyedState implements ConsumerState {
+  public readonly name = this.constructor.name
+
+  constructor(
+    private readonly ctx: ConsumerContext,
+    private readonly args: {consumerTag?: Promise<string>; onDestroyed: (err?: Error) => void}
+  ) {}
+
+  public async onEnter() {
+    this.ctx.cancellationToken.isCanceled = true
+
+    try {
+      const consumerTag = await this.args.consumerTag
+
+      if (consumerTag) {
+        await this.ctx.ch.cancel(consumerTag)
+      }
+
+      this.args.onDestroyed()
+    } catch (err) {
+      this.ctx.processError(err)
+      this.args.onDestroyed(err)
+    }
+  }
+
+  public async init() {
+    throwUnsupportedSignal(this.init.name, this.name)
+  }
+
+  public async destroy() {
+    throwUnsupportedSignal(this.destroy.name, this.name)
+  }
+
+  public processError(err: Error) {
+    this.ctx.onError(err)
+  }
+
+  public processMessage(_: Message) {}
 }

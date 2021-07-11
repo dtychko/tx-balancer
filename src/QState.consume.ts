@@ -4,6 +4,7 @@ import {emptyBuffer} from './constants'
 import {handleMessage} from './amqp/handleMessage'
 import {publishAsync} from './amqp/publishAsync'
 import {QState} from './QState'
+import MirrorQueueConsumer from './MirrorQueueConsumer'
 
 export async function consumeMirrorQueues(params: {
   ch: ConfirmChannel
@@ -14,7 +15,8 @@ export async function consumeMirrorQueues(params: {
   partitionGroupHeader: string
   partitionKeyHeader: string
 }) {
-  const {outputQueueCount, outputQueueName, mirrorQueueName} = params
+  const {ch, qState, outputQueueCount, outputQueueName, mirrorQueueName, partitionGroupHeader, partitionKeyHeader} =
+    params
   const prommises = []
 
   for (let queueIndex = 1; queueIndex <= outputQueueCount; queueIndex++) {
@@ -22,10 +24,14 @@ export async function consumeMirrorQueues(params: {
     const mirrorQueue = mirrorQueueName(outputQueue)
 
     prommises.push(
-      consumeMirrorQueue({
-        ...params,
-        mirrorQueue,
-        outputQueue
+      new MirrorQueueConsumer({
+        ch,
+        qState,
+        onError: () => {},
+        mirrorQueueName: mirrorQueue,
+        outputQueueName: outputQueue,
+        partitionGroupHeader,
+        partitionKeyHeader
       })
     )
   }
