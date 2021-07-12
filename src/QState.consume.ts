@@ -1,7 +1,7 @@
 import {Channel, ConfirmChannel} from 'amqplib'
-import {handleMessage} from './amqp/handleMessage'
 import {QState} from './QState'
 import MirrorQueueConsumer from './MirrorQueueConsumer'
+import QueueConsumer from './QueueConsumer'
 
 export async function consumeMirrorQueues(params: {
   ch: ConfirmChannel
@@ -39,17 +39,17 @@ export async function consumeMirrorQueues(params: {
 export async function consumeResponseQueue(params: {ch: Channel; qState: QState; responseQueueName: string}) {
   const {ch, qState, responseQueueName} = params
 
-  await ch.consume(
-    responseQueueName,
-    handleMessage(msg => {
+  const consumer = new QueueConsumer({
+    ch,
+    queueName: responseQueueName,
+    processMessage: msg => {
       const messageId = msg.properties.messageId
       const deliveryTag = msg.fields.deliveryTag
       const {registered} = qState.registerResponseDeliveryTag(messageId, deliveryTag)
 
-      if (!registered) {
-        ch.ack(msg)
-      }
-    }),
-    {noAck: false}
-  )
+      return registered ? Promise.resolve() : Promise.resolve({ack: true})
+    },
+    onError: err => console.error(err)
+  })
+  await consumer.init()
 }

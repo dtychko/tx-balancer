@@ -1,5 +1,4 @@
 import {Channel, Message} from 'amqplib'
-import MessageBalancer3 from './balancing/MessageBalancer3'
 import {waitFor} from './utils'
 import {callSafe, compareExchangeState, deferred, throwUnsupportedSignal} from './stateMachine'
 
@@ -13,12 +12,12 @@ interface ConsumerContext extends ConsumerArgs {
 
 interface ConsumerArgs {
   ch: Channel
-  messageBalancer: MessageBalancer3
+  queueName: string
+  processMessage: (msg: Message) => Promise<ProcessMessageResult | void>
   onError: (err: Error) => void
-  inputQueueName: string
-  partitionGroupHeader: string
-  partitionKeyHeader: string
 }
+
+type ProcessMessageResult = {ack: true} | {ack: false; requeue: boolean}
 
 interface ConsumerStatistics {
   processingMessageCount: number
@@ -46,7 +45,7 @@ interface ConsumerStatus {
   failedMessageCount: number
 }
 
-export default class InputQueueConsumer {
+export default class QueueConsumer {
   private readonly ctx: ConsumerContext
   private readonly state: {value: ConsumerState}
 
@@ -130,7 +129,7 @@ class InitializedState implements ConsumerState {
     // this.ctx.ch.once('error', () => {})
 
     this.consumerTag = (async () => {
-      const {consumerTag} = await this.ctx.ch.consume(this.ctx.inputQueueName, msg => this.onMessage(msg), {
+      const {consumerTag} = await this.ctx.ch.consume(this.ctx.queueName, msg => this.onMessage(msg), {
         noAck: false
       })
       return consumerTag
@@ -158,11 +157,15 @@ class InitializedState implements ConsumerState {
     this.ctx.statistics.processingMessageCount += 1
 
     try {
-      const {content, properties} = msg
-      const partitionGroup = msg.properties.headers[this.ctx.partitionGroupHeader]
-      const partitionKey = msg.properties.headers[this.ctx.partitionKeyHeader]
-      await this.ctx.messageBalancer.storeMessage({partitionGroup, partitionKey, content, properties})
-      this.ctx.ch.ack(msg)
+      const result = await this.ctx.processMessage(msg)
+
+      if (result) {
+        if (result.ack) {
+          this.ctx.ch.ack(msg)
+        } else {
+          this.ctx.ch.nack(msg, false, result.requeue)
+        }
+      }
 
       this.ctx.statistics.processingMessageCount -= 1
       this.ctx.statistics.processedMessageCount += 1

@@ -2,11 +2,9 @@ import {Db, MessageCache, MessageStorage, migrateDb} from '@targetprocess/balanc
 import {Db3} from './balancing/Db3'
 import MessageBalancer3 from './balancing/MessageBalancer3'
 import MessageStorage3 from './balancing/MessageStorage3'
-import InputQueueConsumer from './InputQueueConsumer'
 import PublishLoop from './PublishLoop'
 import {createQState} from './QState.create'
 import {assertResources} from './assertResources'
-import {Channel} from 'amqplib'
 import {
   amqpUri,
   inputChannelPrefetchCount,
@@ -18,12 +16,12 @@ import {
   postgresConnectionString,
   postgresPoolMax
 } from './config'
-import {handleMessage} from './amqp/handleMessage'
 import {Pool} from 'pg'
 import {Publisher} from './amqp/Publisher'
-import {startFakePublisher} from './fake.publisher'
 import {connect} from './amqp/connect'
+import {startFakePublisher} from './fake.publisher'
 import {startFakeClients} from './fake.client'
+import QueueConsumer from './QueueConsumer'
 
 process.on('uncaughtException', err => {
   console.error('[CRITICAL] uncaughtException: ' + err)
@@ -87,13 +85,18 @@ async function main() {
   const qState = await createQState({ch: qStateCh, onMessageProcessed: () => publishLoop.trigger()})
   console.log('created QState')
 
-  const inputQueueConsumer = new InputQueueConsumer({
+  const inputQueueConsumer = new QueueConsumer({
     ch: inputCh,
-    messageBalancer,
-    onError: () => {},
-    inputQueueName,
-    partitionGroupHeader,
-    partitionKeyHeader
+    queueName: inputQueueName,
+    processMessage: async msg => {
+      const {content, properties} = msg
+      const partitionGroup = msg.properties.headers[partitionGroupHeader]
+      const partitionKey = msg.properties.headers[partitionKeyHeader]
+      await messageBalancer.storeMessage({partitionGroup, partitionKey, content, properties})
+
+      return {ack: true}
+    },
+    onError: () => {}
   })
   await inputQueueConsumer.init()
   // await consumeInputQueue(inputCh, messageBalancer)
@@ -109,11 +112,11 @@ async function main() {
   publishLoop.trigger()
   console.log('started PublishLoop')
 
-  await startFakeClients(fakeConn, outputQueueCount)
-  console.log('started fake clients')
-
-  const publishedCount = await startFakePublisher(fakeConn)
-  console.log(`started fake publisher ${publishedCount}`)
+  // await startFakeClients(fakeConn, outputQueueCount)
+  // console.log('started fake clients')
+  //
+  // const publishedCount = await startFakePublisher(fakeConn)
+  // console.log(`started fake publisher ${publishedCount}`)
 
   setInterval(async () => {
     console.log({
