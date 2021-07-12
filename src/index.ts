@@ -109,11 +109,11 @@ async function main() {
   publishLoop.trigger()
   console.log('started PublishLoop')
 
-  // await startFakeClients(fakeConn, outputQueueCount)
-  // console.log('started fake clients')
-  //
-  // const publishedCount = await startFakePublisher(fakeConn)
-  // console.log(`started fake publisher ${publishedCount}`)
+  await startFakeClients(fakeConn, outputQueueCount)
+  console.log('started fake clients')
+
+  const publishedCount = await startFakePublisher(fakeConn)
+  console.log(`started fake publisher ${publishedCount}`)
 
   setInterval(async () => {
     console.log({
@@ -122,20 +122,6 @@ async function main() {
       qStateSize: qState.size()
     })
   }, 3000)
-}
-
-async function consumeInputQueue(ch: Channel, messageBalancer: MessageBalancer3) {
-  await ch.consume(
-    inputQueueName,
-    handleMessage(async msg => {
-      const {content, properties} = msg
-      const partitionGroup = msg.properties.headers[partitionGroupHeader]
-      const partitionKey = msg.properties.headers[partitionKeyHeader]
-      await messageBalancer.storeMessage({partitionGroup, partitionKey, content, properties})
-      ch.ack(msg)
-    }),
-    {noAck: false}
-  )
 }
 
 main()

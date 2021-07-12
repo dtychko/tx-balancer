@@ -45,7 +45,10 @@ export async function createQState(params: {ch: ConfirmChannel; onMessageProcess
   }
 
   await consumeMirrorQueues(consumeParams)
+  console.log('started mirror queue consumers')
+
   await consumeResponseQueue(consumeParams)
+  console.log('started response queue consumer')
 
   return qState
 }
