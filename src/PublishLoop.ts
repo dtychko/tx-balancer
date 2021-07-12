@@ -112,7 +112,7 @@ export default class PublishLoop {
   }
 
   public async destroy() {
-    await this.state.value.destroy
+    await this.state.value.destroy()
   }
 }
 

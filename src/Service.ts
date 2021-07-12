@@ -7,6 +7,7 @@ import {Db3} from './balancing/Db3'
 import MessageBalancer3 from './balancing/MessageBalancer3'
 import MessageStorage3 from './balancing/MessageStorage3'
 import {
+  amqpUri,
   inputChannelPrefetchCount,
   inputQueueName,
   mirrorQueueName,
@@ -15,6 +16,8 @@ import {
   outputQueueName,
   partitionGroupHeader,
   partitionKeyHeader,
+  postgresConnectionString,
+  postgresPoolMax,
   responseQueueName,
   singlePartitionGroupLimit,
   singlePartitionKeyLimit
@@ -23,119 +26,177 @@ import PublishLoop from './PublishLoop'
 import {QState} from './QState'
 import QueueConsumer from './QueueConsumer'
 import {sumCharCodes} from './utils'
+import MirrorQueueConsumer from './MirrorQueueConsumer'
+import {connect} from './amqp/connect'
 
 export default class Service {
-  constructor(private readonly args: {consumeConnection: Connection; publishConnection: Connection; pool: Pool}) {}
+  private connections: Connection[] = []
+  private channels: Channel[] = []
+  private publishLoop!: PublishLoop
+  private messageBalancer!: MessageBalancer3
+  private qState!: QState
+  private mirrorQueueConsumers!: MirrorQueueConsumer[]
+  private responseQueueConsumer!: QueueConsumer
+  private inputQueueConsumer!: QueueConsumer
 
-  public async start() {
-    const inputCh = await this.args.consumeConnection.createChannel()
-    const qStateCh = await this.args.consumeConnection.createConfirmChannel()
-    const loopCh = await this.args.publishConnection.createConfirmChannel()
+  public status() {
+    return {
+      messageBalancerSize: this.messageBalancer && this.messageBalancer.size(),
+      qStateSize: this.qState && this.qState.size()
+    }
+  }
+
+  public async start(pool: Pool) {
+    const consumeConnection = await connect(amqpUri)
+    const publishConnection = await connect(amqpUri)
+    this.connections.push(consumeConnection, publishConnection)
+    console.log('created connections')
+
+    const inputCh = await consumeConnection.createChannel()
+    const qStateCh = await consumeConnection.createConfirmChannel()
+    const loopCh = await publishConnection.createConfirmChannel()
+    this.channels.push(inputCh, qStateCh, loopCh)
     console.log('created channels')
 
     await inputCh.prefetch(inputChannelPrefetchCount, false)
 
     // Queues purge should be configurable
-    await assertResources(qStateCh, true)
+    await assertResources(qStateCh, false)
     console.log('asserted resources')
 
-    const publishLoop = this.createPublishLoop()
+    this.publishLoop = createPublishLoop()
     console.log('created PublishLoop')
 
-    const messageBalancer = this.createMessageBalancer(publishLoop)
-    await messageBalancer.init({perRequestMessageCountLimit: 10000, initCache: true})
+    this.messageBalancer = createMessageBalancer(pool, this.publishLoop)
+    await this.messageBalancer.init({perRequestMessageCountLimit: 10000, initCache: true})
     console.log('created and initialized BalancedQueue')
 
-    const qState = await this.createQState(qStateCh, publishLoop)
+    this.qState = createQState(qStateCh, this.publishLoop)
     console.log('created QState')
 
-    const inputQueueConsumer = this.createInputQueueConsumer(inputCh, messageBalancer)
-    await inputQueueConsumer.init()
+    this.mirrorQueueConsumers = createMirrorQueueConsumers(qStateCh, this.qState)
+    await Promise.all(this.mirrorQueueConsumers.map(consumer => consumer.init()))
+
+    this.responseQueueConsumer = createResponseQueueConsumer(qStateCh, this.qState)
+    await this.responseQueueConsumer.init()
+
+    this.inputQueueConsumer = createInputQueueConsumer(inputCh, this.messageBalancer)
+    await this.inputQueueConsumer.init()
     console.log('consumed input queue')
 
     const publisher = new Publisher(loopCh)
-    publishLoop.connectTo({publisher, qState, messageBalancer})
+    this.publishLoop.connectTo({publisher, qState: this.qState, messageBalancer: this.messageBalancer})
     console.log('connected PublishLoop')
 
-    publishLoop.trigger()
+    this.publishLoop.trigger()
     console.log('started PublishLoop')
   }
 
-  public async destroy() {}
+  public async destroy() {
+    await Promise.all([
+      this.inputQueueConsumer.destroy(),
+      this.responseQueueConsumer.destroy(),
+      ...this.mirrorQueueConsumers.map(consumer => consumer.destroy()),
+      this.publishLoop.destroy()
+    ])
+    await Promise.all(this.channels.map(ch => ch.close()))
+    await Promise.all(this.connections.map(conn => conn.close()))
+  }
+}
 
-  private createPublishLoop() {
-    return new PublishLoop({
-      mirrorQueueName,
-      partitionGroupHeader,
-      partitionKeyHeader,
-      onError: () => {}
-    })
+function createPublishLoop() {
+  return new PublishLoop({
+    mirrorQueueName,
+    partitionGroupHeader,
+    partitionKeyHeader,
+    onError: () => {}
+  })
+}
+
+function createMessageBalancer(pool: Pool, publishLoop: PublishLoop) {
+  const db = new Db({pool, useQueryCache: true})
+  const db3 = new Db3({pool})
+  const storage = new MessageStorage({db, batchSize: 100})
+  const storage3 = new MessageStorage3({db3})
+  const cache = new MessageCache({maxSize: 1024 ** 3})
+
+  return new MessageBalancer3({
+    storage,
+    storage3,
+    cache,
+    onPartitionAdded: () => publishLoop.trigger()
+  })
+}
+
+function createQState(ch: Channel, publishLoop: PublishLoop) {
+  return new QState({
+    onMessageProcessed: (_, mirrorDeliveryTag, responseDeliveryTag) => {
+      ch.ack({fields: {deliveryTag: mirrorDeliveryTag}} as Message)
+      ch.ack({fields: {deliveryTag: responseDeliveryTag}} as Message)
+      publishLoop.trigger()
+    },
+    partitionGroupHash: partitionGroup => {
+      // Just sum partitionGroup char codes instead of calculating a complex hash
+      return sumCharCodes(partitionGroup)
+    },
+    outputQueueName,
+    queueCount: outputQueueCount,
+    queueSizeLimit: outputQueueLimit,
+    singlePartitionGroupLimit: singlePartitionGroupLimit,
+    singlePartitionKeyLimit: singlePartitionKeyLimit
+  })
+}
+
+function createMirrorQueueConsumers(ch: ConfirmChannel, qState: QState) {
+  const consumers = []
+
+  for (let queueIndex = 1; queueIndex <= outputQueueCount; queueIndex++) {
+    const outputQueue = outputQueueName(queueIndex)
+    const mirrorQueue = mirrorQueueName(outputQueue)
+
+    consumers.push(
+      new MirrorQueueConsumer({
+        ch,
+        qState,
+        onError: err => console.error(err),
+        mirrorQueueName: mirrorQueue,
+        outputQueueName: outputQueue,
+        partitionGroupHeader,
+        partitionKeyHeader
+      })
+    )
   }
 
-  private createMessageBalancer(publishLoop: PublishLoop) {
-    const db = new Db({pool: this.args.pool, useQueryCache: true})
-    const db3 = new Db3({pool: this.args.pool})
-    const storage = new MessageStorage({db, batchSize: 100})
-    const storage3 = new MessageStorage3({db3})
-    const cache = new MessageCache({maxSize: 1024 ** 3})
+  return consumers
+}
 
-    return new MessageBalancer3({
-      storage,
-      storage3,
-      cache,
-      onPartitionAdded: () => publishLoop.trigger()
-    })
-  }
+function createResponseQueueConsumer(ch: Channel, qState: QState) {
+  return new QueueConsumer({
+    ch,
+    queueName: responseQueueName,
+    processMessage: msg => {
+      const messageId = msg.properties.messageId
+      const deliveryTag = msg.fields.deliveryTag
+      const {registered} = qState.registerResponseDeliveryTag(messageId, deliveryTag)
 
-  private createQState(ch: Channel, publishLoop: PublishLoop) {
-    return new QState({
-      onMessageProcessed: (_, mirrorDeliveryTag, responseDeliveryTag) => {
-        ch.ack({fields: {deliveryTag: mirrorDeliveryTag}} as Message)
-        ch.ack({fields: {deliveryTag: responseDeliveryTag}} as Message)
-        publishLoop.trigger()
-      },
-      partitionGroupHash: partitionGroup => {
-        // Just sum partitionGroup char codes instead of calculating a complex hash
-        return sumCharCodes(partitionGroup)
-      },
-      outputQueueName,
-      queueCount: outputQueueCount,
-      queueSizeLimit: outputQueueLimit,
-      singlePartitionGroupLimit: singlePartitionGroupLimit,
-      singlePartitionKeyLimit: singlePartitionKeyLimit
-    })
-  }
+      return registered ? Promise.resolve() : Promise.resolve({ack: true})
+    },
+    onError: err => console.error(err)
+  })
+}
 
-  private createMirrorQueueConsumers() {}
+function createInputQueueConsumer(ch: Channel, messageBalancer: MessageBalancer3) {
+  return new QueueConsumer({
+    ch,
+    queueName: inputQueueName,
+    processMessage: async msg => {
+      const {content, properties} = msg
+      const partitionGroup = msg.properties.headers[partitionGroupHeader]
+      const partitionKey = msg.properties.headers[partitionKeyHeader]
+      await messageBalancer.storeMessage({partitionGroup, partitionKey, content, properties})
 
-  private createResponseQueueConsumer(ch: Channel, qState: QState) {
-    return new QueueConsumer({
-      ch,
-      queueName: responseQueueName,
-      processMessage: msg => {
-        const messageId = msg.properties.messageId
-        const deliveryTag = msg.fields.deliveryTag
-        const {registered} = qState.registerResponseDeliveryTag(messageId, deliveryTag)
-
-        return registered ? Promise.resolve() : Promise.resolve({ack: true})
-      },
-      onError: err => console.error(err)
-    })
-  }
-
-  private createInputQueueConsumer(ch: Channel, messageBalancer: MessageBalancer3) {
-    return new QueueConsumer({
-      ch,
-      queueName: inputQueueName,
-      processMessage: async msg => {
-        const {content, properties} = msg
-        const partitionGroup = msg.properties.headers[partitionGroupHeader]
-        const partitionKey = msg.properties.headers[partitionKeyHeader]
-        await messageBalancer.storeMessage({partitionGroup, partitionKey, content, properties})
-
-        return {ack: true}
-      },
-      onError: err => console.error(err)
-    })
-  }
+      return {ack: true}
+    },
+    onError: err => console.error(err)
+  })
 }
