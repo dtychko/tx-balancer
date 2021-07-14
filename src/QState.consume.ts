@@ -1,7 +1,7 @@
 import {Channel, ConfirmChannel} from 'amqplib'
 import {QState} from './QState'
 import MirrorQueueConsumer from './MirrorQueueConsumer'
-import QueueConsumer from './QueueConsumer'
+import QueueConsumer from './amqp/QueueConsumer'
 
 export async function consumeMirrorQueues(params: {
   ch: ConfirmChannel

@@ -1,5 +1,5 @@
-import {CancellationToken, createDependencies, destroyDependencies, ServiceDependencies} from './Service.dependencies'
-import {callSafe, compareExchangeState, deferred} from './stateMachine'
+import {createDependencies, destroyDependencies, ServiceDependencies} from './Service.dependencies'
+import {callSafe, CancellationToken, compareExchangeState, deferred} from './stateMachine'
 
 interface ServiceContext {
   onError: (err: Error) => void
@@ -10,6 +10,7 @@ interface ServiceContext {
 }
 
 interface ServiceState {
+  name: string
   onEnter?: () => void
 
   start: () => Promise<void>
@@ -56,6 +57,7 @@ export default class Service {
 }
 
 class StartingState implements ServiceState {
+  public readonly name = this.constructor.name
   private dependencies!: Promise<ServiceDependencies>
 
   constructor(private readonly ctx: ServiceContext, private readonly args: {onStarted: (err?: Error) => void}) {}
@@ -96,6 +98,8 @@ class StartingState implements ServiceState {
 }
 
 class StartedState implements ServiceState {
+  public readonly name = this.constructor.name
+
   constructor(private readonly ctx: ServiceContext, private readonly args: {dependencies: ServiceDependencies}) {}
 
   public async start() {
@@ -129,6 +133,7 @@ class StartedState implements ServiceState {
 }
 
 class StoppingState implements ServiceState {
+  public readonly name = this.constructor.name
   private destroyDependenciesPromise!: Promise<undefined>
 
   constructor(
@@ -177,6 +182,8 @@ class StoppingState implements ServiceState {
 }
 
 class StoppedState implements ServiceState {
+  public readonly name = this.constructor.name
+
   constructor(private readonly ctx: ServiceContext) {}
 
   public async start() {
@@ -201,6 +208,8 @@ class StoppedState implements ServiceState {
 }
 
 class ErrorState implements ServiceState {
+  public readonly name = this.constructor.name
+
   constructor(
     private readonly ctx: ServiceContext,
     private readonly args: {
@@ -237,6 +246,7 @@ class ErrorState implements ServiceState {
 }
 
 class DestroyedState implements ServiceState {
+  public readonly name = this.constructor.name
   private destroyDependenciesPromise!: Promise<void>
 
   constructor(

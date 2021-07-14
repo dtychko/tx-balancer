@@ -1,6 +1,14 @@
 import {ConfirmChannel, Message} from 'amqplib'
 import {QState} from './QState'
-import {callSafe, compareExchangeState, deferred, throwUnsupportedSignal} from './stateMachine'
+import {
+  callSafe,
+  CancellationToken,
+  CompareExchangeState,
+  compareExchangeState,
+  deferred,
+  ProcessError,
+  throwUnsupportedSignal
+} from './stateMachine'
 import {partitionGroupHeader, partitionKeyHeader} from './config'
 import {nanoid} from 'nanoid'
 import {publishAsync} from './amqp/publishAsync'
@@ -9,23 +17,19 @@ import {emptyBuffer} from './constants'
 interface ConsumerContext extends ConsumerArgs {
   cancellationToken: CancellationToken
 
-  compareExchangeState: (toState: ConsumerState, fromState: ConsumerState) => boolean
+  compareExchangeState: CompareExchangeState<ConsumerState>
   processMessage: (msg: Message) => void
-  processError: (err: Error) => void
+  processError: ProcessError
 }
 
 interface ConsumerArgs {
   ch: ConfirmChannel
   qState: QState
-  onError: (err: Error) => void
+  onError: ProcessError
   mirrorQueueName: string
   outputQueueName: string
   partitionGroupHeader: string
   partitionKeyHeader: string
-}
-
-interface CancellationToken {
-  isCanceled: boolean
 }
 
 interface ConsumerState {
@@ -35,7 +39,7 @@ interface ConsumerState {
   init: () => Promise<void>
   destroy: () => Promise<void>
   processMessage: (msg: Message) => void
-  processError: (err: Error) => void
+  processError: ProcessError
 }
 
 export default class MirrorQueueConsumer {
@@ -113,28 +117,25 @@ class InitialState implements ConsumerState {
 
 class InitializingState implements ConsumerState {
   public readonly name = this.constructor.name
-
   private readonly markerMessageId: string = `__marker/${nanoid()}`
   private consumerTag!: Promise<string>
 
   constructor(private readonly ctx: ConsumerContext, private readonly args: {onInitialized: (err?: Error) => void}) {}
 
   public async onEnter() {
-    this.consumerTag = (async () => {
-      const {consumerTag} = await this.ctx.ch.consume(this.ctx.mirrorQueueName, msg => this.onMessage(msg), {
-        noAck: false
-      })
-      return consumerTag
-    })()
-
     try {
+      this.consumerTag = (async () => {
+        const {consumerTag} = await this.ctx.ch.consume(this.ctx.mirrorQueueName, msg => this.onMessage(msg), {
+          noAck: false
+        })
+        return consumerTag
+      })()
+      await this.consumerTag
+
       await publishAsync(this.ctx.ch, '', this.ctx.mirrorQueueName, emptyBuffer, {
         persistent: true,
         messageId: this.markerMessageId
       })
-      await this.consumerTag
-
-      this.args.onInitialized()
     } catch (err) {
       this.ctx.processError(err)
     }
@@ -263,6 +264,7 @@ class ErrorState implements ConsumerState {
 
 class DestroyedState implements ConsumerState {
   public readonly name = this.constructor.name
+  private destroyConsumerPromise!: Promise<void>
 
   constructor(
     private readonly ctx: ConsumerContext,
@@ -273,11 +275,8 @@ class DestroyedState implements ConsumerState {
     this.ctx.cancellationToken.isCanceled = true
 
     try {
-      const consumerTag = await this.args.consumerTag
-
-      if (consumerTag) {
-        await this.ctx.ch.cancel(consumerTag)
-      }
+      this.destroyConsumerPromise = this.destroyConsumer()
+      await this.destroyConsumerPromise
 
       this.args.onDestroyed()
     } catch (err) {
@@ -286,12 +285,20 @@ class DestroyedState implements ConsumerState {
     }
   }
 
+  private async destroyConsumer() {
+    const consumerTag = await this.args.consumerTag
+
+    if (consumerTag) {
+      await this.ctx.ch.cancel(consumerTag)
+    }
+  }
+
   public async init() {
     throwUnsupportedSignal(this.init.name, this.name)
   }
 
   public async destroy() {
-    throwUnsupportedSignal(this.destroy.name, this.name)
+    await this.destroyConsumerPromise
   }
 
   public processError(err: Error) {

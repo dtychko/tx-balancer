@@ -1,3 +1,11 @@
+export type CompareExchangeState<TState> = (toState: TState, fromState: TState) => boolean
+
+export type ProcessError = (err: Error) => void
+
+export interface CancellationToken {
+  isCanceled: boolean
+}
+
 export function throwUnsupportedSignal(signal: string, state: string): never {
   throw new Error(`Unsupported signal '${signal}' in state '${state}'`)
 }

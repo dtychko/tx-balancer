@@ -1,20 +1,28 @@
 import {Channel, Message} from 'amqplib'
-import {waitFor} from './utils'
-import {callSafe, compareExchangeState, deferred, throwUnsupportedSignal} from './stateMachine'
+import {waitFor} from '../utils'
+import {
+  callSafe,
+  CancellationToken,
+  CompareExchangeState,
+  compareExchangeState,
+  deferred,
+  ProcessError,
+  throwUnsupportedSignal
+} from '../stateMachine'
 
 interface ConsumerContext extends ConsumerArgs {
   statistics: ConsumerStatistics
   cancellationToken: CancellationToken
 
-  compareExchangeState: (toState: ConsumerState, fromState: ConsumerState) => boolean
-  processError: (err: Error) => void
+  compareExchangeState: CompareExchangeState<ConsumerState>
+  processError: ProcessError
 }
 
 interface ConsumerArgs {
   ch: Channel
   queueName: string
   processMessage: (msg: Message) => Promise<ProcessMessageResult | void>
-  onError: (err: Error) => void
+  onError: ProcessError
 }
 
 type ProcessMessageResult = {ack: true} | {ack: false; requeue: boolean}
@@ -25,17 +33,13 @@ interface ConsumerStatistics {
   failedMessageCount: number
 }
 
-interface CancellationToken {
-  isCanceled: boolean
-}
-
 interface ConsumerState {
   name: string
   onEnter?: () => void
 
   init: () => Promise<void>
   destroy: () => Promise<void>
-  processError: (err: Error) => void
+  processError: ProcessError
 }
 
 interface ConsumerStatus {
@@ -124,15 +128,15 @@ class InitializedState implements ConsumerState {
   constructor(private readonly ctx: ConsumerContext, private readonly args: {onInitialized: (err?: Error) => void}) {}
 
   public async onEnter() {
-    this.consumerTag = (async () => {
-      const {consumerTag} = await this.ctx.ch.consume(this.ctx.queueName, msg => this.onMessage(msg), {
-        noAck: false
-      })
-      return consumerTag
-    })()
-
     try {
+      this.consumerTag = (async () => {
+        const {consumerTag} = await this.ctx.ch.consume(this.ctx.queueName, msg => this.onMessage(msg), {
+          noAck: false
+        })
+        return consumerTag
+      })()
       await this.consumerTag
+
       this.args.onInitialized()
     } catch (err) {
       this.ctx.processError(err)
@@ -221,6 +225,7 @@ class ErrorState implements ConsumerState {
 
 class DestroyedState implements ConsumerState {
   public readonly name = this.constructor.name
+  private destroyConsumerPromise!: Promise<void>
 
   constructor(
     private readonly ctx: ConsumerContext,
@@ -230,16 +235,9 @@ class DestroyedState implements ConsumerState {
   public async onEnter() {
     this.ctx.cancellationToken.isCanceled = true
 
-    // TODO: Think about timeout for waitFor operation
-    // Wait for all active message processing operations are completed
-    await waitFor(() => !this.ctx.statistics.processingMessageCount)
-
     try {
-      const consumerTag = await this.args.consumerTag
-
-      if (consumerTag) {
-        await this.ctx.ch.cancel(consumerTag)
-      }
+      this.destroyConsumerPromise = this.destroyConsumer()
+      await this.destroyConsumerPromise
 
       this.args.onDestroyed()
     } catch (err) {
@@ -248,12 +246,24 @@ class DestroyedState implements ConsumerState {
     }
   }
 
+  private async destroyConsumer() {
+    // TODO: Think about timeout for waitFor operation
+    // Wait for all active message processing operations are completed
+    await waitFor(() => !this.ctx.statistics.processingMessageCount)
+
+    const consumerTag = await this.args.consumerTag
+
+    if (consumerTag) {
+      await this.ctx.ch.cancel(consumerTag)
+    }
+  }
+
   public async init() {
     throwUnsupportedSignal(this.init.name, DestroyedState.name)
   }
 
   public async destroy() {
-    throwUnsupportedSignal(this.destroy.name, DestroyedState.name)
+    await this.destroyConsumerPromise
   }
 
   public processError(err: Error) {

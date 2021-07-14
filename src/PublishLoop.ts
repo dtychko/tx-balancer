@@ -5,14 +5,22 @@ import MessageBalancer3, {MessageRef} from './balancing/MessageBalancer3'
 import {emptyBuffer} from './constants'
 import {QState} from './QState'
 import {setImmediateAsync, waitFor} from './utils'
-import {callSafe, compareExchangeState, deferred, throwUnsupportedSignal} from './stateMachine'
+import {
+  callSafe,
+  CancellationToken,
+  CompareExchangeState,
+  compareExchangeState,
+  deferred,
+  ProcessError,
+  throwUnsupportedSignal
+} from './stateMachine'
 
 interface PublishLoopContext extends PublishLoopArgs {
   executor: ExecutionSerializer
   statistics: PublishLoopStatistics
   cancellationToken: CancellationToken
 
-  compareExchangeState: CompareExchangeState
+  compareExchangeState: CompareExchangeState<PublishLoopState>
   processError: ProcessError
 }
 
@@ -20,7 +28,7 @@ interface PublishLoopArgs {
   mirrorQueueName: (queueName: string) => string
   partitionGroupHeader: string
   partitionKeyHeader: string
-  onError: (err: Error) => void
+  onError: ProcessError
 }
 
 interface PublishLoopStatistics {
@@ -29,14 +37,6 @@ interface PublishLoopStatistics {
   failedMessageCount: number
 }
 
-interface CancellationToken {
-  isCanceled: boolean
-}
-
-type CompareExchangeState = (toState: PublishLoopState, fromState: PublishLoopState) => boolean
-
-type ProcessError = (err: Error) => void
-
 interface PublishLoopState {
   name: string
   onEnter?: () => void
@@ -44,8 +44,7 @@ interface PublishLoopState {
   connectTo: (ars: ConnectToArgs) => void
   trigger: () => {started: boolean}
   destroy: () => Promise<void>
-
-  processError: (err: Error) => void
+  processError: ProcessError
 }
 
 interface PublishLoopStatus {
@@ -215,6 +214,7 @@ class LoopInProgressState implements PublishLoopState {
       const {content, properties} = message
 
       if (this.ctx.cancellationToken.isCanceled) {
+        this.ctx.statistics.processingMessageCount -= 1
         return
       }
 
@@ -271,8 +271,6 @@ class ErrorState implements PublishLoopState {
   constructor(private readonly ctx: PublishLoopContext, private readonly args: {err: Error}) {}
 
   public onEnter() {
-    console.error(this.args.err)
-
     this.ctx.cancellationToken.isCanceled = true
     this.ctx.onError(this.args.err)
   }
@@ -292,7 +290,6 @@ class ErrorState implements PublishLoopState {
   }
 
   public processError(err: Error) {
-    console.error(err)
     this.ctx.onError(err)
   }
 }

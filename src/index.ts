@@ -42,15 +42,20 @@ process.on('unhandledRejection', async res => {
 
 process.on('SIGTERM', async () => {
   console.log('[SIGTERM]')
-  await service.destroy()
+  try {
+    await service.destroy()
+  } catch (err) {
+    console.error(` [SIGTERM] Unable to destroy service: ${err}`)
+    process.exit(1)
+  }
   process.exit(0)
 })
 
 async function main() {
-  // const fakeConn = await connect(amqpUri)
-  // const fakeCh = await fakeConn.createChannel()
-  // await assertResources(fakeCh, true)
-  // console.log('purged all queues')
+  const fakeConn = await connect(amqpUri)
+  const fakeCh = await fakeConn.createChannel()
+  await assertResources(fakeCh, true)
+  console.log('purged all queues')
 
   const pool = new Pool({connectionString: postgresConnectionString, max: 1})
   await migrateDb({pool})
@@ -73,11 +78,11 @@ async function main() {
     }
   }, 10000)
 
-  // await startFakeClients(fakeConn, outputQueueCount)
-  // console.log('started fake clients')
-  //
-  // const publishedCount = await startFakePublisher(fakeConn)
-  // console.log(`started fake publisher ${publishedCount}`)
+  await startFakeClients(fakeConn, outputQueueCount)
+  console.log('started fake clients')
+
+  const publishedCount = await startFakePublisher(fakeConn)
+  console.log(`started fake publisher ${publishedCount}`)
 
   const db = new Db({pool, useQueryCache: true})
 

@@ -26,8 +26,9 @@ import {
 import MirrorQueueConsumer from './MirrorQueueConsumer'
 import PublishLoop from './PublishLoop'
 import {QState} from './QState'
-import QueueConsumer from './QueueConsumer'
+import QueueConsumer from './amqp/QueueConsumer'
 import {sumCharCodes} from './utils'
+import {CancellationToken} from './stateMachine'
 
 export interface ServiceDependencies {
   pool?: Pool
@@ -42,10 +43,6 @@ export interface ServiceDependencies {
   mirrorQueueConsumers?: MirrorQueueConsumer[]
   responseQueueConsumer?: QueueConsumer
   inputQueueConsumer?: QueueConsumer
-}
-
-export interface CancellationToken {
-  isCanceled: boolean
 }
 
 export async function createDependencies(args: {onError: (err: Error) => void; cancellationToken: CancellationToken}) {
@@ -144,28 +141,35 @@ export async function createDependencies(args: {onError: (err: Error) => void; c
 
     return deps
   } catch (err) {
+    console.error(err)
     await destroyDependencies(deps)
     throw err
   }
 }
 
 export async function destroyDependencies(deps: ServiceDependencies) {
-  await Promise.all([
-    destroySafe(deps.inputQueueConsumer),
-    destroySafe(deps.responseQueueConsumer),
-    ...(deps.mirrorQueueConsumers || []).map(consumer => destroySafe(consumer)),
-    destroySafe(deps.publishLoop)
-  ])
-  await Promise.all([closeSafe(deps.inputCh), closeSafe(deps.qStateCh), closeSafe(deps.loopCh)])
-  await Promise.all([closeSafe(deps.publishConnection), closeSafe(deps.consumeConnection)])
-  await safe(async () => {
-    if (deps.pool) {
-      await deps.pool.end()
-    }
-  })
+  const errors = [
+    ...(await Promise.all([
+      destroySafe(deps.inputQueueConsumer),
+      destroySafe(deps.responseQueueConsumer),
+      ...(deps.mirrorQueueConsumers || []).map(consumer => destroySafe(consumer)),
+      destroySafe(deps.publishLoop)
+    ])),
+    ...(await Promise.all([closeSafe(deps.inputCh), closeSafe(deps.qStateCh), closeSafe(deps.loopCh)])),
+    ...(await Promise.all([closeSafe(deps.publishConnection), closeSafe(deps.consumeConnection)])),
+    await safe(async () => {
+      if (deps.pool) {
+        await deps.pool.end()
+      }
+    })
+  ].filter(err => err) as Error[]
+
+  if (errors.length) {
+    throw new Error(`Unexpected errors (count: ${errors.length}) occurred during destroying dependencies`)
+  }
 }
 
-async function destroySafe(destroyable?: {destroy: () => Promise<void>}): Promise<Error | void> {
+async function destroySafe(destroyable?: {destroy: () => Promise<void>}): Promise<Error | undefined> {
   return await safe(async () => {
     if (destroyable) {
       await destroyable.destroy()
@@ -173,7 +177,7 @@ async function destroySafe(destroyable?: {destroy: () => Promise<void>}): Promis
   })
 }
 
-async function closeSafe(closable?: Channel | Connection): Promise<Error | void> {
+async function closeSafe(closable?: Channel | Connection): Promise<Error | undefined> {
   return await safe(async () => {
     if (closable) {
       await closable.close()
@@ -181,10 +185,12 @@ async function closeSafe(closable?: Channel | Connection): Promise<Error | void>
   })
 }
 
-async function safe(action: () => Promise<void>): Promise<Error | void> {
+async function safe(action: () => Promise<void>): Promise<Error | undefined> {
   try {
     await action()
+    return undefined
   } catch (err) {
+    console.error(err)
     return err
   }
 }
