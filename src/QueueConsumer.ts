@@ -124,10 +124,6 @@ class InitializedState implements ConsumerState {
   constructor(private readonly ctx: ConsumerContext, private readonly args: {onInitialized: (err?: Error) => void}) {}
 
   public async onEnter() {
-    // TODO: move to ErrorState when channel is closed
-    // this.ctx.ch.once('close', () => {})
-    // this.ctx.ch.once('error', () => {})
-
     this.consumerTag = (async () => {
       const {consumerTag} = await this.ctx.ch.consume(this.ctx.queueName, msg => this.onMessage(msg), {
         noAck: false

@@ -1,202 +1,282 @@
-import {Db, MessageCache, MessageStorage, migrateDb} from '@targetprocess/balancer-core'
-import {Channel, ConfirmChannel, Connection, Message} from 'amqplib'
-import {Pool} from 'pg'
-import {Publisher} from './amqp/Publisher'
-import {assertResources} from './assertResources'
-import {Db3} from './balancing/Db3'
-import MessageBalancer3 from './balancing/MessageBalancer3'
-import MessageStorage3 from './balancing/MessageStorage3'
-import {
-  amqpUri,
-  inputChannelPrefetchCount,
-  inputQueueName,
-  mirrorQueueName,
-  outputQueueCount,
-  outputQueueLimit,
-  outputQueueName,
-  partitionGroupHeader,
-  partitionKeyHeader,
-  postgresConnectionString,
-  postgresPoolMax,
-  responseQueueName,
-  singlePartitionGroupLimit,
-  singlePartitionKeyLimit
-} from './config'
-import PublishLoop from './PublishLoop'
-import {QState} from './QState'
-import QueueConsumer from './QueueConsumer'
-import {sumCharCodes} from './utils'
-import MirrorQueueConsumer from './MirrorQueueConsumer'
-import {connect} from './amqp/connect'
+import {CancellationToken, createDependencies, destroyDependencies, ServiceDependencies} from './Service.dependencies'
+import {callSafe, compareExchangeState, deferred} from './stateMachine'
+
+interface ServiceContext {
+  onError: (err: Error) => void
+  cancellationToken: CancellationToken
+
+  compareExchangeState: (toState: ServiceState, fromState: ServiceState) => boolean
+  processError: (err: Error) => void
+}
+
+interface ServiceState {
+  onEnter?: () => void
+
+  start: () => Promise<void>
+  stop: () => Promise<void>
+  destroy: () => Promise<void>
+  processError: (err: Error) => void
+}
 
 export default class Service {
-  private connections: Connection[] = []
-  private channels: Channel[] = []
-  private publishLoop!: PublishLoop
-  private messageBalancer!: MessageBalancer3
-  private qState!: QState
-  private mirrorQueueConsumers!: MirrorQueueConsumer[]
-  private responseQueueConsumer!: QueueConsumer
-  private inputQueueConsumer!: QueueConsumer
+  private readonly ctx: ServiceContext
+  private readonly state: {value: ServiceState}
 
-  public status() {
-    return {
-      messageBalancerSize: this.messageBalancer && this.messageBalancer.size(),
-      qStateSize: this.qState && this.qState.size()
+  constructor(args: {onError: (err: Error) => void}) {
+    this.ctx = {
+      onError: err => callSafe(() => args.onError(err)),
+      cancellationToken: {isCanceled: false},
+
+      compareExchangeState: (toState, fromState) => {
+        return compareExchangeState(this.state, toState, fromState)
+      },
+      processError: err => {
+        this.state.value.processError(err)
+      }
+    }
+
+    this.state = {value: new StoppedState(this.ctx)}
+
+    if (this.state.value.onEnter) {
+      this.state.value.onEnter()
     }
   }
 
-  public async start(pool: Pool) {
-    const consumeConnection = await connect(amqpUri)
-    const publishConnection = await connect(amqpUri)
-    this.connections.push(consumeConnection, publishConnection)
-    console.log('created connections')
+  public start() {
+    return this.state.value.start()
+  }
 
-    const inputCh = await consumeConnection.createChannel()
-    const qStateCh = await consumeConnection.createConfirmChannel()
-    const loopCh = await publishConnection.createConfirmChannel()
-    this.channels.push(inputCh, qStateCh, loopCh)
-    console.log('created channels')
+  public stop() {
+    return this.state.value.stop()
+  }
 
-    await inputCh.prefetch(inputChannelPrefetchCount, false)
+  public destroy() {
+    return this.state.value.destroy()
+  }
+}
 
-    // Queues purge should be configurable
-    await assertResources(qStateCh, false)
-    console.log('asserted resources')
+class StartingState implements ServiceState {
+  private dependencies!: Promise<ServiceDependencies>
 
-    this.publishLoop = createPublishLoop()
-    console.log('created PublishLoop')
+  constructor(private readonly ctx: ServiceContext, private readonly args: {onStarted: (err?: Error) => void}) {}
 
-    this.messageBalancer = createMessageBalancer(pool, this.publishLoop)
-    await this.messageBalancer.init({perRequestMessageCountLimit: 10000, initCache: true})
-    console.log('created and initialized BalancedQueue')
+  public async onEnter() {
+    this.dependencies = (async () =>
+      await createDependencies({
+        onError: err => this.ctx.processError(err),
+        cancellationToken: this.ctx.cancellationToken
+      }))()
 
-    this.qState = createQState(qStateCh, this.publishLoop)
-    console.log('created QState')
+    try {
+      const dependencies = await this.dependencies
+      this.ctx.compareExchangeState(new StartedState(this.ctx, {dependencies}), this)
+      this.args.onStarted()
+    } catch (err) {
+      this.ctx.processError(err)
+      this.args.onStarted(err)
+    }
+  }
 
-    this.mirrorQueueConsumers = createMirrorQueueConsumers(qStateCh, this.qState)
-    await Promise.all(this.mirrorQueueConsumers.map(consumer => consumer.init()))
+  public async start() {
+    throw new Error('Unable to start. Service is already starting')
+  }
 
-    this.responseQueueConsumer = createResponseQueueConsumer(qStateCh, this.qState)
-    await this.responseQueueConsumer.init()
-
-    this.inputQueueConsumer = createInputQueueConsumer(inputCh, this.messageBalancer)
-    await this.inputQueueConsumer.init()
-    console.log('consumed input queue')
-
-    const publisher = new Publisher(loopCh)
-    this.publishLoop.connectTo({publisher, qState: this.qState, messageBalancer: this.messageBalancer})
-    console.log('connected PublishLoop')
-
-    this.publishLoop.trigger()
-    console.log('started PublishLoop')
+  public async stop() {
+    throw new Error('Unable to stop. Service is still starting')
   }
 
   public async destroy() {
-    await Promise.all([
-      this.inputQueueConsumer.destroy(),
-      this.responseQueueConsumer.destroy(),
-      ...this.mirrorQueueConsumers.map(consumer => consumer.destroy()),
-      this.publishLoop.destroy()
-    ])
-    await Promise.all(this.channels.map(ch => ch.close()))
-    await Promise.all(this.connections.map(conn => conn.close()))
+    await deferred(onDestroyed => {
+      this.ctx.compareExchangeState(new DestroyedState(this.ctx, {dependencies: this.dependencies, onDestroyed}), this)
+    })
+  }
+
+  public processError(err: Error) {
+    this.ctx.compareExchangeState(new ErrorState(this.ctx, {dependencies: this.dependencies, err}), this)
   }
 }
 
-function createPublishLoop() {
-  return new PublishLoop({
-    mirrorQueueName,
-    partitionGroupHeader,
-    partitionKeyHeader,
-    onError: () => {}
-  })
-}
+class StartedState implements ServiceState {
+  constructor(private readonly ctx: ServiceContext, private readonly args: {dependencies: ServiceDependencies}) {}
 
-function createMessageBalancer(pool: Pool, publishLoop: PublishLoop) {
-  const db = new Db({pool, useQueryCache: true})
-  const db3 = new Db3({pool})
-  const storage = new MessageStorage({db, batchSize: 100})
-  const storage3 = new MessageStorage3({db3})
-  const cache = new MessageCache({maxSize: 1024 ** 3})
+  public async start() {
+    throw new Error('Unable to start. Service is already started')
+  }
 
-  return new MessageBalancer3({
-    storage,
-    storage3,
-    cache,
-    onPartitionAdded: () => publishLoop.trigger()
-  })
-}
+  public async stop() {
+    await deferred(onStopped => {
+      this.ctx.compareExchangeState(
+        new StoppingState(this.ctx, {dependencies: this.args.dependencies, onStopped}),
+        this
+      )
+    })
+  }
 
-function createQState(ch: Channel, publishLoop: PublishLoop) {
-  return new QState({
-    onMessageProcessed: (_, mirrorDeliveryTag, responseDeliveryTag) => {
-      ch.ack({fields: {deliveryTag: mirrorDeliveryTag}} as Message)
-      ch.ack({fields: {deliveryTag: responseDeliveryTag}} as Message)
-      publishLoop.trigger()
-    },
-    partitionGroupHash: partitionGroup => {
-      // Just sum partitionGroup char codes instead of calculating a complex hash
-      return sumCharCodes(partitionGroup)
-    },
-    outputQueueName,
-    queueCount: outputQueueCount,
-    queueSizeLimit: outputQueueLimit,
-    singlePartitionGroupLimit: singlePartitionGroupLimit,
-    singlePartitionKeyLimit: singlePartitionKeyLimit
-  })
-}
+  public async destroy() {
+    await deferred(onDestroyed => {
+      this.ctx.compareExchangeState(
+        new DestroyedState(this.ctx, {dependencies: Promise.resolve(this.args.dependencies), onDestroyed}),
+        this
+      )
+    })
+  }
 
-function createMirrorQueueConsumers(ch: ConfirmChannel, qState: QState) {
-  const consumers = []
-
-  for (let queueIndex = 1; queueIndex <= outputQueueCount; queueIndex++) {
-    const outputQueue = outputQueueName(queueIndex)
-    const mirrorQueue = mirrorQueueName(outputQueue)
-
-    consumers.push(
-      new MirrorQueueConsumer({
-        ch,
-        qState,
-        onError: err => console.error(err),
-        mirrorQueueName: mirrorQueue,
-        outputQueueName: outputQueue,
-        partitionGroupHeader,
-        partitionKeyHeader
-      })
+  public processError(err: Error) {
+    this.ctx.compareExchangeState(
+      new ErrorState(this.ctx, {dependencies: Promise.resolve(this.args.dependencies), err}),
+      this
     )
   }
-
-  return consumers
 }
 
-function createResponseQueueConsumer(ch: Channel, qState: QState) {
-  return new QueueConsumer({
-    ch,
-    queueName: responseQueueName,
-    processMessage: msg => {
-      const messageId = msg.properties.messageId
-      const deliveryTag = msg.fields.deliveryTag
-      const {registered} = qState.registerResponseDeliveryTag(messageId, deliveryTag)
+class StoppingState implements ServiceState {
+  private destroyDependencies!: Promise<void>
 
-      return registered ? Promise.resolve() : Promise.resolve({ack: true})
-    },
-    onError: err => console.error(err)
-  })
+  constructor(
+    private readonly ctx: ServiceContext,
+    private readonly args: {dependencies: ServiceDependencies; onStopped: (err?: Error) => void}
+  ) {}
+
+  public async onEnter() {
+    this.destroyDependencies = (async () => {
+      await destroyDependencies(this.args.dependencies)
+    })()
+
+    try {
+      await this.destroyDependencies
+
+      this.ctx.compareExchangeState(new StoppedState(this.ctx), this)
+      this.args.onStopped()
+    } catch (err) {
+      this.ctx.processError(err)
+      this.args.onStopped(err)
+    }
+  }
+
+  public async start() {
+    throw new Error('Unable to start. Service is still stopping')
+  }
+
+  public async stop() {
+    throw new Error('Unable to stop. Service is already stopping')
+  }
+
+  public async destroy() {
+    await deferred(onDestroyed => {
+      this.ctx.compareExchangeState(
+        new DestroyedState(this.ctx, {dependencies: this.waitForDestroyed(), onDestroyed}),
+        this
+      )
+    })
+  }
+
+  public processError(err: Error) {
+    this.ctx.compareExchangeState(new ErrorState(this.ctx, {dependencies: this.waitForDestroyed(), err}), this)
+  }
+
+  private async waitForDestroyed() {
+    await this.destroyDependencies
+    return {}
+  }
 }
 
-function createInputQueueConsumer(ch: Channel, messageBalancer: MessageBalancer3) {
-  return new QueueConsumer({
-    ch,
-    queueName: inputQueueName,
-    processMessage: async msg => {
-      const {content, properties} = msg
-      const partitionGroup = msg.properties.headers[partitionGroupHeader]
-      const partitionKey = msg.properties.headers[partitionKeyHeader]
-      await messageBalancer.storeMessage({partitionGroup, partitionKey, content, properties})
+class StoppedState implements ServiceState {
+  constructor(private readonly ctx: ServiceContext) {}
 
-      return {ack: true}
-    },
-    onError: err => console.error(err)
-  })
+  public async start() {
+    await deferred(onStarted => {
+      this.ctx.compareExchangeState(new StartingState(this.ctx, {onStarted}), this)
+    })
+  }
+
+  public async stop() {
+    throw new Error("Unable to stop. Service wasn't started")
+  }
+
+  public async destroy() {
+    await deferred(onDestroyed => {
+      this.ctx.compareExchangeState(
+        new DestroyedState(this.ctx, {dependencies: Promise.resolve({}), onDestroyed}),
+        this
+      )
+    })
+  }
+
+  processError(err: Error) {
+    this.ctx.compareExchangeState(new ErrorState(this.ctx, {dependencies: Promise.resolve({}), err}), this)
+  }
+}
+
+class ErrorState implements ServiceState {
+  constructor(
+    private readonly ctx: ServiceContext,
+    private readonly args: {dependencies: Promise<ServiceDependencies>; err: Error}
+  ) {}
+
+  public async onEnter() {
+    this.ctx.cancellationToken.isCanceled = true
+    this.ctx.onError(this.args.err)
+  }
+
+  public async start() {
+    throw new Error('Unable to start. Service is failed')
+  }
+
+  public async stop() {
+    throw new Error('Unable to stop. Service is failed')
+  }
+
+  public async destroy() {
+    await deferred(onDestroyed => {
+      this.ctx.compareExchangeState(
+        new DestroyedState(this.ctx, {dependencies: this.args.dependencies, onDestroyed}),
+        this
+      )
+    })
+  }
+
+  public processError(err: Error) {
+    this.ctx.onError(err)
+  }
+}
+
+class DestroyedState implements ServiceState {
+  private destroyDependencies!: Promise<void>
+
+  constructor(
+    private readonly ctx: ServiceContext,
+    private readonly args: {dependencies: Promise<ServiceDependencies>; onDestroyed: (err?: Error) => void}
+  ) {}
+
+  public async onEnter() {
+    this.ctx.cancellationToken.isCanceled = true
+    this.destroyDependencies = (async () => {
+      const dependencies = await this.args.dependencies
+      await destroyDependencies(dependencies)
+    })()
+
+    try {
+      await this.destroyDependencies
+
+      this.args.onDestroyed()
+    } catch (err) {
+      this.args.onDestroyed(err)
+    }
+  }
+
+  public async start() {
+    throw new Error('Unable to start. Service is destroyed')
+  }
+
+  public async stop() {
+    throw new Error('Unable to stop. Service is destroyed')
+  }
+
+  public async destroy() {
+    await this.destroyDependencies
+  }
+
+  public processError(err: Error) {
+    this.ctx.onError(err)
+  }
 }

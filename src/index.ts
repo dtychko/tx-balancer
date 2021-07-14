@@ -7,42 +7,52 @@ import Service from './Service'
 import {startFakePublisher} from './fake.publisher'
 import {startFakeClients} from './fake.client'
 
-process.on('uncaughtException', err => {
+const service = new Service({onError: err => console.error(` [Service/onError] ${err}`)})
+
+process.on('uncaughtException', async err => {
   console.error('[CRITICAL] uncaughtException: ' + err)
+  await service.destroy()
+  process.exit(1)
 })
 
-process.on('unhandledRejection', res => {
+process.on('unhandledRejection', async res => {
   console.error('[CRITICAL] unhandledRejection: ' + res)
+  await service.destroy()
+  process.exit(1)
+})
+
+process.on('SIGTERM', async () => {
+  console.log('[SIGTERM]')
+  await service.destroy()
+  process.exit(0)
 })
 
 async function main() {
   const fakeConn = await connect(amqpUri)
   const fakeCh = await fakeConn.createChannel()
-
-  // Queues purge should be configurable
   await assertResources(fakeCh, true)
+  console.log('purged all queues')
 
-  const pool = new Pool({
-    connectionString: postgresConnectionString,
-    max: postgresPoolMax
-  })
+  const pool = new Pool({connectionString: postgresConnectionString, max: 1})
   await migrateDb({pool})
   console.log('migrated DB')
 
-  // DB clean up should be configurable
   await pool.query('delete from messages')
   console.log('cleaned DB')
 
-  let service = new Service()
-  await service.start(pool)
+  await service.start()
+  console.log('started service')
 
   setInterval(async () => {
-    const startedAt = Date.now()
-    await service.destroy()
-    console.log(`destroyed service in ${Date.now() - startedAt} ms`)
-    service = new Service()
-    await service.start(pool)
-  }, 5000)
+    try {
+      const startedAt = Date.now()
+      await service.stop()
+      await service.start()
+      console.log(`restarted service in ${Date.now() - startedAt} ms`)
+    } catch (err) {
+      console.error(` [Service] Unable to restart service: ${err}`)
+    }
+  }, 10000)
 
   await startFakeClients(fakeConn, outputQueueCount)
   console.log('started fake clients')
@@ -54,8 +64,8 @@ async function main() {
 
   setInterval(async () => {
     console.log({
-      dbMessageCount: (await db.readStats()).messageCount,
-      ...service.status()
+      dbMessageCount: (await db.readStats()).messageCount
+      // ...service.status()
     })
   }, 3000)
 }
