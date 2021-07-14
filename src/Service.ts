@@ -61,14 +61,13 @@ class StartingState implements ServiceState {
   constructor(private readonly ctx: ServiceContext, private readonly args: {onStarted: (err?: Error) => void}) {}
 
   public async onEnter() {
-    this.dependencies = (async () =>
-      await createDependencies({
+    try {
+      this.dependencies = createDependencies({
         onError: err => this.ctx.processError(err),
         cancellationToken: this.ctx.cancellationToken
-      }))()
-
-    try {
+      })
       const dependencies = await this.dependencies
+
       this.ctx.compareExchangeState(new StartedState(this.ctx, {dependencies}), this)
       this.args.onStarted()
     } catch (err) {
@@ -130,7 +129,7 @@ class StartedState implements ServiceState {
 }
 
 class StoppingState implements ServiceState {
-  private destroyDependencies!: Promise<void>
+  private destroyDependenciesPromise!: Promise<undefined>
 
   constructor(
     private readonly ctx: ServiceContext,
@@ -138,12 +137,9 @@ class StoppingState implements ServiceState {
   ) {}
 
   public async onEnter() {
-    this.destroyDependencies = (async () => {
-      await destroyDependencies(this.args.dependencies)
-    })()
-
     try {
-      await this.destroyDependencies
+      this.destroyDependenciesPromise = this.destroyDependencies()
+      await this.destroyDependenciesPromise
 
       this.ctx.compareExchangeState(new StoppedState(this.ctx), this)
       this.args.onStopped()
@@ -151,6 +147,11 @@ class StoppingState implements ServiceState {
       this.ctx.processError(err)
       this.args.onStopped(err)
     }
+  }
+
+  private async destroyDependencies() {
+    await destroyDependencies(this.args.dependencies)
+    return undefined
   }
 
   public async start() {
@@ -164,19 +165,14 @@ class StoppingState implements ServiceState {
   public async destroy() {
     await deferred(onDestroyed => {
       this.ctx.compareExchangeState(
-        new DestroyedState(this.ctx, {dependencies: this.waitForDestroyed(), onDestroyed}),
+        new DestroyedState(this.ctx, {dependencies: this.destroyDependenciesPromise, onDestroyed}),
         this
       )
     })
   }
 
   public processError(err: Error) {
-    this.ctx.compareExchangeState(new ErrorState(this.ctx, {dependencies: this.waitForDestroyed(), err}), this)
-  }
-
-  private async waitForDestroyed() {
-    await this.destroyDependencies
-    return {}
+    this.ctx.compareExchangeState(new ErrorState(this.ctx, {dependencies: this.destroyDependenciesPromise, err}), this)
   }
 }
 
@@ -195,22 +191,22 @@ class StoppedState implements ServiceState {
 
   public async destroy() {
     await deferred(onDestroyed => {
-      this.ctx.compareExchangeState(
-        new DestroyedState(this.ctx, {dependencies: Promise.resolve({}), onDestroyed}),
-        this
-      )
+      this.ctx.compareExchangeState(new DestroyedState(this.ctx, {onDestroyed}), this)
     })
   }
 
   processError(err: Error) {
-    this.ctx.compareExchangeState(new ErrorState(this.ctx, {dependencies: Promise.resolve({}), err}), this)
+    this.ctx.compareExchangeState(new ErrorState(this.ctx, {err}), this)
   }
 }
 
 class ErrorState implements ServiceState {
   constructor(
     private readonly ctx: ServiceContext,
-    private readonly args: {dependencies: Promise<ServiceDependencies>; err: Error}
+    private readonly args: {
+      dependencies?: Promise<ServiceDependencies | undefined>
+      err: Error
+    }
   ) {}
 
   public async onEnter() {
@@ -241,26 +237,41 @@ class ErrorState implements ServiceState {
 }
 
 class DestroyedState implements ServiceState {
-  private destroyDependencies!: Promise<void>
+  private destroyDependenciesPromise!: Promise<void>
 
   constructor(
     private readonly ctx: ServiceContext,
-    private readonly args: {dependencies: Promise<ServiceDependencies>; onDestroyed: (err?: Error) => void}
+    private readonly args: {
+      dependencies?: Promise<ServiceDependencies | undefined>
+      onDestroyed: (err?: Error) => void
+    }
   ) {}
 
   public async onEnter() {
     this.ctx.cancellationToken.isCanceled = true
-    this.destroyDependencies = (async () => {
-      const dependencies = await this.args.dependencies
-      await destroyDependencies(dependencies)
-    })()
 
     try {
-      await this.destroyDependencies
+      this.destroyDependenciesPromise = this.destroyDependencies()
+      await this.destroyDependenciesPromise
 
       this.args.onDestroyed()
     } catch (err) {
       this.args.onDestroyed(err)
+    }
+  }
+
+  private async destroyDependencies() {
+    const dependencies = await this.tryGetDependencies()
+    if (dependencies) {
+      await destroyDependencies(dependencies)
+    }
+  }
+
+  private async tryGetDependencies() {
+    try {
+      return await this.args.dependencies
+    } catch {
+      return undefined
     }
   }
 
@@ -273,7 +284,7 @@ class DestroyedState implements ServiceState {
   }
 
   public async destroy() {
-    await this.destroyDependencies
+    await this.destroyDependenciesPromise
   }
 
   public processError(err: Error) {

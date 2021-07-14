@@ -52,12 +52,12 @@ export async function createDependencies(args: {onError: (err: Error) => void; c
   const {onError, cancellationToken} = args
   const deps: ServiceDependencies = {}
 
-  const throwIfCanceled = async <T>(create: () => Promise<T>): Promise<T> => {
+  const throwIfCanceled = <T>(create: () => Promise<T>): Promise<T> => {
     if (cancellationToken.isCanceled) {
       throw new Error('Creation of dependencies is cancelled')
     }
 
-    return await create()
+    return create()
   }
 
   try {
@@ -69,20 +69,40 @@ export async function createDependencies(args: {onError: (err: Error) => void; c
     console.log('migrated DB')
 
     deps.consumeConnection = await throwIfCanceled(() => connect(amqpUri))
-    deps.consumeConnection.on('error', err => onError(err))
+    deps.consumeConnection.on('close', reason => {
+      if (reason) {
+        onError(new Error(`Connection#consume was unexpectedly closed with reason: ${reason}`))
+      }
+    })
 
     deps.publishConnection = await throwIfCanceled(() => connect(amqpUri))
-    deps.publishConnection.on('error', err => onError(err))
+    deps.publishConnection.on('close', reason => {
+      if (reason) {
+        onError(new Error(`Connection#publish was unexpectedly closed with reason: ${reason}`))
+      }
+    })
     console.log('created connections')
 
     deps.inputCh = await throwIfCanceled(async () => await deps.consumeConnection!.createChannel())
-    deps.inputCh.on('error', err => onError(err))
+    deps.inputCh.on('close', reason => {
+      if (reason) {
+        onError(new Error(`Channel#input was unexpectedly closed with reason: ${reason}`))
+      }
+    })
 
     deps.qStateCh = await throwIfCanceled(async () => await deps.consumeConnection!.createConfirmChannel())
-    deps.qStateCh.on('error', err => onError(err))
+    deps.qStateCh.on('close', reason => {
+      if (reason) {
+        onError(new Error(`Channel#qState was unexpectedly closed with reason: ${reason}`))
+      }
+    })
 
     deps.loopCh = await throwIfCanceled(async () => await deps.publishConnection!.createConfirmChannel())
-    deps.loopCh.on('error', err => onError(err))
+    deps.loopCh.on('close', reason => {
+      if (reason) {
+        onError(new Error(`Channel#loop was unexpectedly closed with reason: ${reason}`))
+      }
+    })
     console.log('created channels')
 
     await throwIfCanceled(async () => await deps.inputCh!.prefetch(inputChannelPrefetchCount, false))
