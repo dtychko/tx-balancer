@@ -92,13 +92,9 @@ export default class PublishLoop {
   }
 
   public status(): PublishLoopStatus {
-    const {processingMessageCount, processedMessageCount, failedMessageCount} = this.ctx.statistics
-
     return {
       state: this.state.value.name,
-      processingMessageCount,
-      processedMessageCount,
-      failedMessageCount
+      ...this.ctx.statistics
     }
   }
 

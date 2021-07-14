@@ -80,13 +80,9 @@ export default class QueueConsumer {
   }
 
   public status(): ConsumerStatus {
-    const {processingMessageCount, processedMessageCount, failedMessageCount} = this.ctx.statistics
-
     return {
       state: this.state.value.name,
-      processingMessageCount,
-      processedMessageCount,
-      failedMessageCount
+      ...this.ctx.statistics
     }
   }
 

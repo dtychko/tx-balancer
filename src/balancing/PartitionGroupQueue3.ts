@@ -7,6 +7,16 @@ export default class PartitionGroupQueue3 {
 
   private messageCount = 0
 
+  public status() {
+    return {
+      messageCount: this.messageCount,
+      partitionGroupCount: this.partitionGroupQueue.length,
+      partitionKeyCount: this.partitionGroupQueue.reduce((acc, {centrifuge}) => {
+        return acc + centrifuge.partitionCount()
+      }, 0)
+    }
+  }
+
   public size() {
     return this.messageCount
   }

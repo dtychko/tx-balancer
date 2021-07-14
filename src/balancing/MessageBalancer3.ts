@@ -43,6 +43,14 @@ export default class MessageBalancer3 {
     this.onPartitionAdded = params.onPartitionAdded
   }
 
+  public status() {
+    return {
+      cachedMessageCount: this.cache.count(),
+      cachedMessageSize: this.cache.size(),
+      ...this.partitionGroupQueue.status()
+    }
+  }
+
   public size() {
     return this.partitionGroupQueue.size()
   }

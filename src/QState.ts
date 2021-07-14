@@ -69,11 +69,7 @@ export class QState {
     }
   }
 
-  public size() {
-    return this.messageSessionsByMessageId.size
-  }
-
-  public stats() {
+  public status() {
     return {
       queueCount: this.queueSessions.length,
       partitionGroupCount: this.partitionGroupSessionsByPartitionGroup.size,
@@ -83,6 +79,10 @@ export class QState {
       ),
       messageCount: this.messageSessionsByMessageId.size
     }
+  }
+
+  public size() {
+    return this.messageSessionsByMessageId.size
   }
 
   public diagnosticsState() {

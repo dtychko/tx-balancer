@@ -15,6 +15,7 @@ import {publishAsync} from './amqp/publishAsync'
 import {emptyBuffer} from './constants'
 
 interface ConsumerContext extends ConsumerArgs {
+  statistics: ConsumerStatistics
   cancellationToken: CancellationToken
 
   compareExchangeState: CompareExchangeState<ConsumerState>
@@ -42,6 +43,11 @@ interface ConsumerState {
   processError: ProcessError
 }
 
+interface ConsumerStatistics {
+  processedMessageCount: number
+  failedMessageCount: number
+}
+
 export default class MirrorQueueConsumer {
   private readonly ctx: ConsumerContext
   private readonly state: {value: ConsumerState}
@@ -54,6 +60,7 @@ export default class MirrorQueueConsumer {
         callSafe(() => args.onError(err))
       },
 
+      statistics: {processedMessageCount: 0, failedMessageCount: 0},
       cancellationToken: {isCanceled: false},
 
       compareExchangeState: (toState, fromState) => {
@@ -76,7 +83,8 @@ export default class MirrorQueueConsumer {
 
   public status() {
     return {
-      state: this.state.value.name
+      state: this.state.value.name,
+      ...this.ctx.statistics
     }
   }
 
@@ -170,6 +178,7 @@ class InitializingState implements ConsumerState {
 
       if (messageId === this.markerMessageId) {
         this.ctx.ch.ack(msg)
+        this.ctx.statistics.processedMessageCount += 1
         this.ctx.compareExchangeState(new InitializedState(this.ctx, {consumerTag: this.consumerTag}), this)
         this.args.onInitialized()
         return
@@ -181,7 +190,9 @@ class InitializingState implements ConsumerState {
 
       this.ctx.qState.restoreMessage(messageId, partitionGroup, partitionKey, this.ctx.outputQueueName)
       this.ctx.qState.registerMirrorDeliveryTag(messageId, deliveryTag)
+      this.ctx.statistics.processedMessageCount += 1
     } catch (err) {
+      this.ctx.statistics.failedMessageCount += 1
       this.ctx.processError(err)
     }
   }
@@ -219,7 +230,10 @@ class InitializedState implements ConsumerState {
       if (!registered) {
         this.ctx.ch.ack(msg)
       }
+
+      this.ctx.statistics.processedMessageCount += 1
     } catch (err) {
+      this.ctx.statistics.failedMessageCount += 1
       this.ctx.processError(err)
     }
   }

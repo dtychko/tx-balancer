@@ -13,6 +13,7 @@ interface ServiceState {
   name: string
   onEnter?: () => void
 
+  status?: () => ReturnType<typeof getServiceStatus>
   start: () => Promise<void>
   stop: () => Promise<void>
   destroy: () => Promise<void>
@@ -40,6 +41,13 @@ export default class Service {
 
     if (this.state.value.onEnter) {
       this.state.value.onEnter()
+    }
+  }
+
+  public status() {
+    return {
+      state: this.state.value.name,
+      ...(this.state.value.status && this.state.value.status())
     }
   }
 
@@ -102,6 +110,10 @@ class StartedState implements ServiceState {
 
   constructor(private readonly ctx: ServiceContext, private readonly args: {dependencies: ServiceDependencies}) {}
 
+  public status() {
+    return getServiceStatus(this.args.dependencies)
+  }
+
   public async start() {
     throw new Error('Unable to start. Service is already started')
   }
@@ -159,6 +171,10 @@ class StoppingState implements ServiceState {
     return undefined
   }
 
+  public status() {
+    return getServiceStatus(this.args.dependencies)
+  }
+
   public async start() {
     throw new Error('Unable to start. Service is still stopping')
   }
@@ -209,6 +225,7 @@ class StoppedState implements ServiceState {
 
 class ErrorState implements ServiceState {
   public readonly name = this.constructor.name
+  private dependencies?: ServiceDependencies
 
   constructor(
     private readonly ctx: ServiceContext,
@@ -220,7 +237,17 @@ class ErrorState implements ServiceState {
 
   public async onEnter() {
     this.ctx.cancellationToken.isCanceled = true
+    ;(async () => {
+      try {
+        this.dependencies = await this.dependencies
+      } catch {}
+    })()
+
     this.ctx.onError(this.args.err)
+  }
+
+  public status() {
+    return getServiceStatus(this.dependencies)
   }
 
   public async start() {
@@ -248,6 +275,7 @@ class ErrorState implements ServiceState {
 class DestroyedState implements ServiceState {
   public readonly name = this.constructor.name
   private destroyDependenciesPromise!: Promise<void>
+  private dependencies?: ServiceDependencies
 
   constructor(
     private readonly ctx: ServiceContext,
@@ -279,10 +307,14 @@ class DestroyedState implements ServiceState {
 
   private async tryGetDependencies() {
     try {
-      return await this.args.dependencies
+      return (this.dependencies = await this.args.dependencies)
     } catch {
       return undefined
     }
+  }
+
+  public status() {
+    return getServiceStatus(this.dependencies)
   }
 
   public async start() {
@@ -299,5 +331,20 @@ class DestroyedState implements ServiceState {
 
   public processError(err: Error) {
     this.ctx.onError(err)
+  }
+}
+
+function getServiceStatus(dependencies?: ServiceDependencies) {
+  if (!dependencies) {
+    return undefined
+  }
+
+  return {
+    qState: dependencies.qState?.status(),
+    messageBalancer: dependencies.messageBalancer?.status(),
+    publishLoop: dependencies.publishLoop?.status(),
+    inputQueueConsumer: dependencies.inputQueueConsumer?.status(),
+    responseQueueConsumer: dependencies.responseQueueConsumer?.status(),
+    mirrorQueueConsumers: dependencies.mirrorQueueConsumers?.map(consumer => consumer.status())
   }
 }

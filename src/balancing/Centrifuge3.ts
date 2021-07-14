@@ -9,6 +9,10 @@ export default class Centrifuge3<TValue> {
     return this.valueCount
   }
 
+  public partitionCount() {
+    return this.partitions.size
+  }
+
   public enqueue(value: TValue, partitionKey: string): number {
     let partition = this.partitions.get(partitionKey)
     if (!partition) {

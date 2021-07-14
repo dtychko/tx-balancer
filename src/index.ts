@@ -13,6 +13,7 @@ const service = new Service({
     console.log(err.stack)
     try {
       await service.destroy()
+      // TODO: log service.status()
     } catch (err) {
       console.error(` [Service/onError] Unable to destroy service: ${err}`)
     }
@@ -67,16 +68,16 @@ async function main() {
   await service.start()
   console.log('started service')
 
-  setInterval(async () => {
-    try {
-      const startedAt = Date.now()
-      await service.stop()
-      await service.start()
-      console.log(`restarted service in ${Date.now() - startedAt} ms`)
-    } catch (err) {
-      console.error(` [Service] Unable to restart service: ${err}`)
-    }
-  }, 10000)
+  // setInterval(async () => {
+  //   try {
+  //     const startedAt = Date.now()
+  //     await service.stop()
+  //     await service.start()
+  //     console.log(`restarted service in ${Date.now() - startedAt} ms`)
+  //   } catch (err) {
+  //     console.error(` [Service] Unable to restart service: ${err}`)
+  //   }
+  // }, 10000)
 
   await startFakeClients(fakeConn, outputQueueCount)
   console.log('started fake clients')
@@ -87,9 +88,13 @@ async function main() {
   const db = new Db({pool, useQueryCache: true})
 
   setInterval(async () => {
+    // console.log({
+    //   dbMessageCount: (await db.readStats()).messageCount
+    //   ...service.status()
+    // })
     console.log({
+      ...service.status(),
       dbMessageCount: (await db.readStats()).messageCount
-      // ...service.status()
     })
   }, 3000)
 }

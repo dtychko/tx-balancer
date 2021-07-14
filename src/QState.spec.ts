@@ -58,7 +58,7 @@ test('restoreMessage', () => {
     ]
   })
 
-  expect(qState.stats()).toEqual({
+  expect(qState.status()).toEqual({
     queueCount: 3,
     partitionGroupCount: 3,
     partitionKeyCount: 6,
@@ -158,7 +158,7 @@ test('registerMessage', () => {
     ]
   })
 
-  expect(qState.stats()).toEqual({
+  expect(qState.status()).toEqual({
     queueCount: 3,
     partitionGroupCount: 3,
     partitionKeyCount: 6,
