@@ -25,11 +25,14 @@ import MirrorQueueConsumer from './MirrorQueueConsumer'
 import PublishLoop from './PublishLoop'
 import {QState} from './QState'
 import QueueConsumer from './QueueConsumer'
-import {compareExchangeState, deferred} from './stateMachine'
+import {callSafe, compareExchangeState, deferred} from './stateMachine'
 import {sumCharCodes} from './utils'
 
 interface ServiceContext {
+  onError: (err: Error) => void
+
   compareExchangeState: (toState: ServiceState, fromState: ServiceState) => boolean
+  processError: (err: Error) => void
 }
 
 interface ServiceState {
@@ -38,6 +41,7 @@ interface ServiceState {
   start: (pool: Pool) => Promise<void>
   stop: () => Promise<void>
   destroy: () => Promise<void>
+  processError: (err: Error) => void
 }
 
 interface ServiceDependencies {
@@ -58,10 +62,15 @@ export default class Service {
   private readonly ctx: ServiceContext
   private readonly state: {value: ServiceState}
 
-  constructor() {
+  constructor(args: {onError: (err: Error) => void}) {
     this.ctx = {
+      onError: err => callSafe(() => args.onError(err)),
+
       compareExchangeState: (toState, fromState) => {
         return compareExchangeState(this.state, toState, fromState)
+      },
+      processError: err => {
+        this.state.value.processError(err)
       }
     }
 
@@ -101,7 +110,7 @@ class StartingState implements ServiceState {
       this.ctx.compareExchangeState(new StartedState(this.ctx, {deps}), this)
       this.args.onStarted()
     } catch (err) {
-      this.ctx.compareExchangeState(new StoppedState(this.ctx), this)
+      this.processError(err)
       this.args.onStarted(err)
     }
   }
@@ -118,6 +127,10 @@ class StartingState implements ServiceState {
     await deferred(onDestroyed => {
       this.ctx.compareExchangeState(new DestroyedState(this.ctx, {deps: this.deps, onDestroyed}), this)
     })
+  }
+
+  public processError(err: Error) {
+    this.ctx.compareExchangeState(new ErrorState(this.ctx, {deps: this.deps, err}), this)
   }
 }
 
@@ -142,21 +155,33 @@ class StartedState implements ServiceState {
       )
     })
   }
+
+  public processError(err: Error) {
+    this.ctx.compareExchangeState(new ErrorState(this.ctx, {deps: Promise.resolve(this.args.deps), err}), this)
+  }
 }
 
 class StoppingState implements ServiceState {
+  private destroyDeps!: Promise<void>
+
   constructor(
     private readonly ctx: ServiceContext,
     private readonly args: {deps: ServiceDependencies; onStopped: (err?: Error) => void}
   ) {}
 
   public async onEnter() {
-    try {
+    this.destroyDeps = (async () => {
       await destroyDeps(this.args.deps)
+    })()
+
+    try {
+      await this.destroyDeps
 
       this.ctx.compareExchangeState(new StoppedState(this.ctx), this)
       this.args.onStopped()
     } catch (err) {
+      // TODO: processError
+      this.ctx.compareExchangeState(new StoppedState(this.ctx), this)
       this.args.onStopped(err)
     }
   }
@@ -170,9 +195,23 @@ class StoppingState implements ServiceState {
   }
 
   public async destroy() {
-    // await deferred(onDestroyed => {
-    //   this.ctx.compareExchangeState(new DestroyedState(this.ctx, {deps: Promise.resolve({}), onDestroyed}), this)
-    // })
+    const deps = (async () => {
+      await this.destroyDeps
+      return {}
+    })()
+
+    await deferred(onDestroyed => {
+      this.ctx.compareExchangeState(new DestroyedState(this.ctx, {deps, onDestroyed}), this)
+    })
+  }
+
+  public processError(err: Error) {
+    const deps = (async () => {
+      await this.destroyDeps
+      return {}
+    })()
+
+    this.ctx.compareExchangeState(new ErrorState(this.ctx, {deps, err}), this)
   }
 }
 
@@ -194,9 +233,41 @@ class StoppedState implements ServiceState {
       this.ctx.compareExchangeState(new DestroyedState(this.ctx, {deps: Promise.resolve({}), onDestroyed}), this)
     })
   }
+
+  processError(err: Error) {
+    // ? Throw unexpected singnal error
+    this.ctx.compareExchangeState(new ErrorState(this.ctx, {deps: Promise.resolve({}), err}), this)
+  }
 }
 
-class ErrorState {}
+class ErrorState implements ServiceState {
+  constructor(
+    private readonly ctx: ServiceContext,
+    private readonly args: {deps: Promise<ServiceDependencies>; err: Error}
+  ) {}
+
+  public async onEnter() {
+    this.ctx.onError(this.args.err)
+  }
+
+  public async start() {
+    throw new Error('Unable to start. Service is failed')
+  }
+
+  public async stop() {
+    throw new Error('Unable to stop. Service is failed')
+  }
+
+  public async destroy() {
+    await deferred(onDestroyed => {
+      this.ctx.compareExchangeState(new DestroyedState(this.ctx, {deps: this.args.deps, onDestroyed}), this)
+    })
+  }
+
+  public processError(err: Error) {
+    this.ctx.onError(err)
+  }
+}
 
 class DestroyedState implements ServiceState {
   constructor(
@@ -225,6 +296,10 @@ class DestroyedState implements ServiceState {
 
   public async destroy() {
     throw new Error('Service is already destroyed')
+  }
+
+  public processError(err: Error) {
+    this.ctx.onError(err)
   }
 }
 
