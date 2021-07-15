@@ -62,6 +62,7 @@ export async function createDependencies(args: {onError: (err: Error) => void; c
       connectionString: postgresConnectionString,
       max: postgresPoolMax
     })
+    deps.pool.on('error', err => onError(err))
     await throwIfCanceled(() => migrateDb({pool: deps.pool!}))
     console.log('migrated DB')
 
